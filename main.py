@@ -1,149 +1,124 @@
 import asyncio
-import aiohttp
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, CommandObject
 from aiohttp import web
-import time
-from collections import deque
-import os
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 
-# ================= TOKEN =================
-BOT_TOKEN = "8145739398:AAG3dl79hQnSsTe1KoYGt9hvaaUsR3XXllY"
+TOKEN = "8145739398:AAG3dl79hQnSsTe1KoYGt9hvaaUsR3XXllY"
 
-# ================= SETTINGS =================
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
 settings = {
-    "percent": 5.0,
-    "window_min": 15,
-    "check_interval": 30,
-    "min_volume": 100000,
+    "percent": 10.0,
+    "window_min": 5,
+    "min_volume": 50000,
+    "blacklist": set(),
     "chat_id": None
 }
 
-price_history = {}
-blacklist = set()
-last_alert = {}
-COOLDOWN = 300
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-# ================= COMMANDS =================
-
+# ---------------- /start ----------------
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     settings["chat_id"] = message.chat.id
-    await message.answer("🚀 Бот запущен")
 
+    await message.answer(
+        "🚀 Бот-сканер MEXC запущен\n\n"
+        "📉 Порог падения: 10.0%\n"
+        "⏱ Окно анализа: 5 мин\n"
+        "💰 Мин. объём: 50,000$\n\n"
+        "⚙️ Команды:\n"
+        "/p 5 — % падения\n"
+        "/t 10 — окно (мин)\n"
+        "/v 200000 — объём $\n"
+        "/b BTC — в ЧС\n"
+        "/ub BTC — из ЧС\n"
+        "/s — статус"
+    )
+
+
+# ---------------- /p ----------------
 @dp.message(Command("p"))
-async def set_percent(message: types.Message, command: CommandObject):
-    settings["percent"] = float(command.args)
-    await message.answer(f"OK {settings['percent']}%")
+async def set_percent(message: types.Message):
+    try:
+        value = float(message.text.split()[1])
+        settings["percent"] = value
+        await message.answer(f"📉 Новый порог: {value}%")
+    except:
+        await message.answer("Используй: /p 5")
 
+
+# ---------------- /t ----------------
 @dp.message(Command("t"))
-async def set_time(message: types.Message, command: CommandObject):
-    settings["window_min"] = int(command.args)
-    await message.answer("OK")
+async def set_window(message: types.Message):
+    try:
+        value = int(message.text.split()[1])
+        settings["window_min"] = value
+        await message.answer(f"⏱ Окно: {value} мин")
+    except:
+        await message.answer("Используй: /t 10")
 
+
+# ---------------- /v ----------------
 @dp.message(Command("v"))
-async def set_volume(message: types.Message, command: CommandObject):
-    settings["min_volume"] = int(command.args)
-    await message.answer("OK")
+async def set_volume(message: types.Message):
+    try:
+        value = int(message.text.split()[1])
+        settings["min_volume"] = value
+        await message.answer(f"💰 Мин. объём: {value}$")
+    except:
+        await message.answer("Используй: /v 200000")
 
+
+# ---------------- /b ----------------
 @dp.message(Command("b"))
-async def add_blacklist(message: types.Message, command: CommandObject):
-    coin = command.args.upper()
-    blacklist.add(coin)
-    await message.answer("OK")
+async def blacklist_add(message: types.Message):
+    try:
+        coin = message.text.split()[1].upper()
+        settings["blacklist"].add(coin)
+        await message.answer(f"🚫 {coin} добавлен в ЧС")
+    except:
+        await message.answer("Используй: /b BTC")
 
-# ================= MEXC =================
 
-async def fetch_prices():
-    url = "https://api.mexc.com/api/v3/ticker/24hr"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as r:
-            return await r.json()
+# ---------------- /ub ----------------
+@dp.message(Command("ub"))
+async def blacklist_remove(message: types.Message):
+    try:
+        coin = message.text.split()[1].upper()
+        settings["blacklist"].discard(coin)
+        await message.answer(f"✅ {coin} удалён из ЧС")
+    except:
+        await message.answer("Используй: /ub BTC")
 
-async def parser_task():
-    while True:
-        try:
-            if settings["chat_id"]:
-                data = await fetch_prices()
-                now = time.time()
 
-                for item in data:
-                    pair = item["symbol"]
-                    if not pair.endswith("USDT") or pair in blacklist:
-                        continue
+# ---------------- /s ----------------
+@dp.message(Command("s"))
+async def status(message: types.Message):
+    await message.answer(
+        f"📊 Статус\n\n"
+        f"📉 Порог: {settings['percent']}%\n"
+        f"⏱ Окно: {settings['window_min']} мин\n"
+        f"💰 Объём: {settings['min_volume']}$\n"
+        f"🚫 ЧС: {', '.join(settings['blacklist']) if settings['blacklist'] else 'пусто'}"
+    )
 
-                    volume = float(item["quoteVolume"])
-                    if volume < settings["min_volume"]:
-                        continue
 
-                    price = float(item["lastPrice"])
-
-                    max_points = int((settings["window_min"] * 60) / settings["check_interval"])
-
-                    if pair not in price_history:
-                        price_history[pair] = deque(maxlen=max_points)
-
-                    history = price_history[pair]
-
-                    if len(history) > 0:
-                        max_price = max(history)
-                        drop = ((max_price - price) / max_price) * 100
-
-                        if drop >= settings["percent"]:
-                            if pair not in last_alert or (now - last_alert[pair]) > COOLDOWN:
-                                last_alert[pair] = now
-                                await bot.send_message(
-                                    settings["chat_id"],
-                                    f"🚨 {pair}\n-{drop:.2f}%"
-                                )
-
-                    history.append(price)
-
-        except Exception as e:
-            print("Parser error:", e)
-
-        await asyncio.sleep(settings["check_interval"])
-
-# ================= WEBHOOK =================
-
-async def handle_ping(request):
-    return web.Response(text="OK")
-
+# ---------------- WEBHOOK ----------------
 async def webhook_handler(request):
     data = await request.json()
     update = types.Update.model_validate(data)
     await dp.feed_update(bot, update)
     return web.Response(text="ok")
 
-# ================= MAIN =================
 
-async def main():
-    asyncio.create_task(parser_task())
+async def on_startup(app):
+    await bot.set_webhook("https://YOUR_DOMAIN/webhook")
 
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    app.router.add_post("/webhook", webhook_handler)
 
-    runner = web.AppRunner(app)
-    await runner.setup()
+app = web.Application()
+app.router.add_post("/webhook", webhook_handler)
+app.on_startup.append(on_startup)
 
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    webhook_url = f"{url}/webhook"
-
-    await bot.delete_webhook(drop_pending_updates=True)
-    await bot.set_webhook(webhook_url)
-
-    print("WEBHOOK:", webhook_url)
-
-    while True:
-        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(app, port=10000)
