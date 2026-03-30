@@ -1,9 +1,10 @@
 import asyncio
+import os
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 
-TOKEN = "8145739398:AAG3dl79hQnSsTe1KoYGt9hvaaUsR3XXllY"
+TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -36,40 +37,34 @@ async def start_cmd(message: types.Message):
     )
 
 
-# ---------------- /p ----------------
+# ---------------- COMMANDS ----------------
 @dp.message(Command("p"))
 async def set_percent(message: types.Message):
     try:
-        value = float(message.text.split()[1])
-        settings["percent"] = value
-        await message.answer(f"📉 Новый порог: {value}%")
+        settings["percent"] = float(message.text.split()[1])
+        await message.answer(f"📉 Новый порог: {settings['percent']}%")
     except:
         await message.answer("Используй: /p 5")
 
 
-# ---------------- /t ----------------
 @dp.message(Command("t"))
 async def set_window(message: types.Message):
     try:
-        value = int(message.text.split()[1])
-        settings["window_min"] = value
-        await message.answer(f"⏱ Окно: {value} мин")
+        settings["window_min"] = int(message.text.split()[1])
+        await message.answer(f"⏱ Окно: {settings['window_min']} мин")
     except:
         await message.answer("Используй: /t 10")
 
 
-# ---------------- /v ----------------
 @dp.message(Command("v"))
 async def set_volume(message: types.Message):
     try:
-        value = int(message.text.split()[1])
-        settings["min_volume"] = value
-        await message.answer(f"💰 Мин. объём: {value}$")
+        settings["min_volume"] = int(message.text.split()[1])
+        await message.answer(f"💰 Мин. объём: {settings['min_volume']}$")
     except:
         await message.answer("Используй: /v 200000")
 
 
-# ---------------- /b ----------------
 @dp.message(Command("b"))
 async def blacklist_add(message: types.Message):
     try:
@@ -80,7 +75,6 @@ async def blacklist_add(message: types.Message):
         await message.answer("Используй: /b BTC")
 
 
-# ---------------- /ub ----------------
 @dp.message(Command("ub"))
 async def blacklist_remove(message: types.Message):
     try:
@@ -91,7 +85,6 @@ async def blacklist_remove(message: types.Message):
         await message.answer("Используй: /ub BTC")
 
 
-# ---------------- /s ----------------
 @dp.message(Command("s"))
 async def status(message: types.Message):
     await message.answer(
@@ -111,8 +104,13 @@ async def webhook_handler(request):
     return web.Response(text="ok")
 
 
+# ---------------- AUTO WEBHOOK ----------------
 async def on_startup(app):
-    await bot.set_webhook("https://YOUR_DOMAIN/webhook")
+    base_url = os.getenv("RENDER_EXTERNAL_URL")  # Render сам даёт
+    webhook_url = f"{base_url}/webhook"
+
+    await bot.set_webhook(webhook_url)
+    print("WEBHOOK SET:", webhook_url)
 
 
 app = web.Application()
@@ -121,4 +119,5 @@ app.on_startup.append(on_startup)
 
 
 if __name__ == "__main__":
-    web.run_app(app, port=10000)
+    port = int(os.getenv("PORT", 10000))
+    web.run_app(app, port=port)
