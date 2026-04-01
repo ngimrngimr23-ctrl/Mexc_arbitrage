@@ -6,25 +6,23 @@ from aiohttp import web
 import time
 from collections import deque
 import os
-import sys
 
 # ================= НАСТРОЙКИ =================
-# Твой токен (береги его, не показывай посторонним)
 BOT_TOKEN = "8145739398:AAG3dl79hQnSsTe1KoYGt9hvaaUsR3XXllY"
 
 settings = {
-    "percent": 5.0,       # Порог падения в окне (%)
-    "window_min": 15,     # Окно анализа (мин)
-    "check_interval": 30, # Как часто проверять (сек)
-    "min_volume": 100000, # Мин. объем 24ч ($)
-    "day_drop": 0.0,      # Порог падения за 24ч (%)
+    "percent": 5.0,        # Порог падения в окне (%)
+    "window_min": 15,      # Окно анализа (мин)
+    "check_interval": 30,  # Как часто проверять (сек)
+    "min_volume": 100000,  # Мин. объем 24ч ($)
+    "day_drop": 0.0,       # Порог падения за 24ч (%)
+    "cooldown_min": 5,     # Минимальная пауза между любыми сообщениями по одной монете (мин)
     "chat_id": None
 }
 
 price_history = {}
 blacklist = set()
-last_alert = {}
-COOLDOWN = 300 
+daily_memory = {} # Память о дампах за последние 24 часа
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -39,17 +37,16 @@ async def start_cmd(message: types.Message):
         f"📉 Порог окна: <b>{settings['percent']}%</b>\n"
         f"📅 Порог 24ч: <b>{settings['day_drop']}%</b>\n"
         f"⏱ Окно анализа: <b>{settings['window_min']} мин</b>\n"
-        f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n\n"
+        f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n"
+        f"🛡 Защита: <b>Повтор только при дампе x2 (без сброса при росте)</b>\n\n"
         "⚙️ <b>Команды:</b>\n"
-        "/p 5 — изменить % падения в окне\n"
-        "/d 5 — изменить % падения за 24ч\n"
-        "/t 10 — изменить окно (мин)\n"
-        "/v 200000 — мин. объём $\n"
-        "/b BTC — добавить в ЧС\n"
-        "/ub BTC — убрать из ЧС\n"
-        "/s — текущий статус"
+        "/p 5 — % падения в окне\n"
+        "/d 5 — % падения за 24ч\n"
+        "/t 10 — окно (мин)\n"
+        "/v 200000 — объем $\n"
+        "/b BTC — в ЧС\n"
+        "/s — статус"
     , parse_mode="HTML")
-    print(f"--- Бот активирован пользователем {message.chat.id} ---", flush=True)
 
 @dp.message(Command("p"))
 async def set_percent(message: types.Message, command: CommandObject):
@@ -57,8 +54,7 @@ async def set_percent(message: types.Message, command: CommandObject):
         val = float(command.args.replace(',', '.'))
         settings["percent"] = val
         await message.answer(f"✅ Порог падения: <b>{val}%</b>", parse_mode="HTML")
-    except:
-        await message.answer("❌ Ошибка. Пример: /p 7.5")
+    except: await message.answer("❌ Ошибка. Пример: /p 7.5")
 
 @dp.message(Command("d"))
 async def set_day_drop(message: types.Message, command: CommandObject):
@@ -66,8 +62,7 @@ async def set_day_drop(message: types.Message, command: CommandObject):
         val = float(command.args.replace(',', '.'))
         settings["day_drop"] = -abs(val) 
         await message.answer(f"✅ Фильтр 24ч: <b>{settings['day_drop']}%</b>", parse_mode="HTML")
-    except:
-        await message.answer("❌ Ошибка. Пример: /d 5")
+    except: await message.answer("❌ Ошибка. Пример: /d 5")
 
 @dp.message(Command("t"))
 async def set_time(message: types.Message, command: CommandObject):
@@ -89,14 +84,6 @@ async def add_blacklist(message: types.Message, command: CommandObject):
         blacklist.add(pair)
         await message.answer(f"🚫 <b>{pair}</b> в ЧС")
 
-@dp.message(Command("ub"))
-async def remove_blacklist(message: types.Message, command: CommandObject):
-    if command.args:
-        coin = command.args.upper()
-        pair = coin if coin.endswith("USDT") else f"{coin}USDT"
-        blacklist.discard(pair)
-        await message.answer(f"✅ <b>{pair}</b> удален из ЧС")
-
 @dp.message(Command("s"))
 async def status_cmd(message: types.Message):
     await message.answer(
@@ -104,7 +91,7 @@ async def status_cmd(message: types.Message):
         f"📉 Окно: {settings['percent']}% ({settings['window_min']}м)\n"
         f"📅 24ч: {settings['day_drop']}%\n"
         f"💰 Объём: {settings['min_volume']:,}$\n"
-        f"📡 Пар: {len(price_history)}"
+        f"🛑 В памяти дампов: {len(daily_memory)}"
     , parse_mode="HTML")
 
 # ================= API & LOGIC =================
@@ -114,10 +101,8 @@ async def fetch_prices():
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    return await response.json()
-    except Exception as e:
-        print(f"Ошибка API: {e}", flush=True)
+                if response.status == 200: return await response.json()
+    except Exception as e: print(f"Ошибка API: {e}", flush=True)
     return []
 
 async def parser_task():
@@ -128,6 +113,7 @@ async def parser_task():
                 data = await fetch_prices()
                 now = time.time()
                 max_pts = int((settings["window_min"] * 60) / settings["check_interval"])
+                cooldown_sec = settings["cooldown_min"] * 60
 
                 for item in data:
                     pair = item['symbol']
@@ -146,56 +132,65 @@ async def parser_task():
                     if len(history) > 0:
                         max_p = max(history)
                         drop = ((max_p - price) / max_p) * 100
+                        
+                        # Очистка старой памяти (старше 24ч)
+                        if pair in daily_memory and (now - daily_memory[pair]["time"]) >= 86400:
+                            del daily_memory[pair]
+
+                        # Проверка условий
                         if drop >= settings["percent"] and ch_24 <= settings["day_drop"]:
-                            if pair not in last_alert or (now - last_alert[pair]) > COOLDOWN:
-                                last_alert[pair] = now
+                            should_alert = True
+                            is_repeat = False
+                            
+                            if pair in daily_memory:
+                                # Минимальная пауза от спама (чтобы не слал сообщения каждую секунду)
+                                if (now - daily_memory[pair]["last_msg"]) < cooldown_sec:
+                                    should_alert = False
+                                else:
+                                    # Условие x2: упасть еще сильнее от цены ПРЕДЫДУЩЕГО сигнала
+                                    req_drop = settings["percent"] * 2
+                                    threshold = daily_memory[pair]["price"] * (1 - (req_drop / 100))
+                                    if price <= threshold:
+                                        is_repeat = True
+                                    else:
+                                        should_alert = False
+                            
+                            if should_alert:
+                                daily_memory[pair] = {
+                                    "time": daily_memory[pair]["time"] if pair in daily_memory else now,
+                                    "price": price,
+                                    "last_msg": now
+                                }
+                                
+                                label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
                                 await bot.send_message(
                                     settings["chat_id"],
-                                    f"🚨 <b>ДАМП: {pair}</b>\n"
-                                    f"📉 Окно: <b>-{drop:.2f}%</b>\n"
-                                    f"📊 24ч: <b>{ch_24:.2f}%</b>\n"
-                                    f"💰 Объем: <b>{int(vol):,}$</b>",
+                                    f"🚨 <b>ДАМП: {pair}</b>\n{label}"
+                                    f"📉 В окне: <b>-{drop:.2f}%</b>\n"
+                                    f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
+                                    f"💵 Было (пик): <code>{max_p}</code>\n"
+                                    f"💸 Стало (тек): <code>{price}</code>\n"
+                                    f"💰 Объём: <b>{int(vol):,}$</b>",
                                     parse_mode="HTML"
                                 )
                     history.append(price)
-        except Exception as e:
-            print(f"Ошибка в цикле парсера: {e}", flush=True)
+        except Exception as e: print(f"Ошибка парсера: {e}", flush=True)
         await asyncio.sleep(settings["check_interval"])
 
 # ================= WEB & RUN =================
 
-async def handle_ping(request):
-    return web.Response(text="Бот жив!", status=200)
+async def handle_ping(request): return web.Response(text="OK", status=200)
 
 async def main():
-    print("--- Запуск инициализации ---", flush=True)
-    
-    # 1. Сначала запускаем веб-сервер, чтобы Render был доволен
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
     await site.start()
-    print(f"--- Веб-сервер готов на порту {port} ---", flush=True)
-
-    # 2. Очистка вебхуков
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # 3. Запуск парсера в фоне
     asyncio.create_task(parser_task())
-    
-    # 4. Запуск Polling
-    print("--- Polling запущен, бот слушает команды ---", flush=True)
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("Бот остановлен")
-        
+    asyncio.run(main())
