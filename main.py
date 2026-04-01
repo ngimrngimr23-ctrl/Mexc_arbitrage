@@ -136,7 +136,7 @@ async def parser_task():
                         vol = float(item['quoteVolume'])
                         if vol < settings["min_volume"]: continue
                         price = float(item['lastPrice'])
-                        ch_24 = float(item['priceChangePercent'])
+                        ch_24 = float(item['priceChangePercent']) * 100
                     except: continue
 
                     if pair not in price_history or price_history[pair].maxlen != max_pts:
