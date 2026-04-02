@@ -16,13 +16,15 @@ settings = {
     "check_interval": 30,  # Как часто проверять (сек)
     "min_volume": 100000,  # Мин. объем 24ч ($)
     "day_drop": 0.0,       # Порог падения за 24ч (%)
-    "cooldown_min": 5,     # Минимальная пауза между любыми сообщениями по одной монете (мин)
+    "cooldown_min": 5,     # Минимальная пауза от спама (мин)
+    "week_drop": 0.0,      # МАКС. падение за 7 дней (0 - выключено)
+    "month_drop": 0.0,     # МАКС. падение за 30 дней (0 - выключено)
     "chat_id": None
 }
 
 price_history = {}
 blacklist = set()
-daily_memory = {} # Память о дампах за последние 24 часа
+daily_memory = {} 
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -36,12 +38,14 @@ async def start_cmd(message: types.Message):
         "🚀 <b>Бот-сканер MEXC запущен</b>\n\n"
         f"📉 Порог окна: <b>{settings['percent']}%</b>\n"
         f"📅 Порог 24ч: <b>{settings['day_drop']}%</b>\n"
-        f"⏱ Окно анализа: <b>{settings['window_min']} мин</b>\n"
-        f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n"
-        f"🛡 Защита: <b>Повтор только при дампе x2 (без сброса при росте)</b>\n\n"
+        f"📆 Фильтр 7д: <b>{'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}</b>\n"
+        f"🗓 Фильтр 30д: <b>{'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}</b>\n"
+        f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n\n"
         "⚙️ <b>Команды:</b>\n"
         "/p 5 — % падения в окне\n"
         "/d 5 — % падения за 24ч\n"
+        "/w 30 — скрыть, если упала >30% за 7 дней (0=выкл)\n"
+        "/m 50 — скрыть, если упала >50% за 30 дней (0=выкл)\n"
         "/t 10 — окно (мин)\n"
         "/v 200000 — объем $\n"
         "/b BTC — в ЧС\n"
@@ -63,6 +67,28 @@ async def set_day_drop(message: types.Message, command: CommandObject):
         settings["day_drop"] = -abs(val) 
         await message.answer(f"✅ Фильтр 24ч: <b>{settings['day_drop']}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /d 5")
+
+@dp.message(Command("w"))
+async def set_week_drop(message: types.Message, command: CommandObject):
+    try:
+        val = abs(float(command.args.replace(',', '.')))
+        settings["week_drop"] = val
+        if val == 0:
+            await message.answer("✅ Фильтр 7 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
+        else:
+            await message.answer(f"✅ Фильтр 7 дней: скрывать монеты, упавшие больше чем на <b>-{val}%</b>", parse_mode="HTML")
+    except: await message.answer("❌ Ошибка. Пример: /w 30 (для отключения введи /w 0)")
+
+@dp.message(Command("m"))
+async def set_month_drop(message: types.Message, command: CommandObject):
+    try:
+        val = abs(float(command.args.replace(',', '.')))
+        settings["month_drop"] = val
+        if val == 0:
+            await message.answer("✅ Фильтр 30 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
+        else:
+            await message.answer(f"✅ Фильтр 30 дней: скрывать монеты, упавшие больше чем на <b>-{val}%</b>", parse_mode="HTML")
+    except: await message.answer("❌ Ошибка. Пример: /m 50 (для отключения введи /m 0)")
 
 @dp.message(Command("t"))
 async def set_time(message: types.Message, command: CommandObject):
@@ -90,6 +116,8 @@ async def status_cmd(message: types.Message):
         "📊 <b>Статус</b>\n"
         f"📉 Окно: {settings['percent']}% ({settings['window_min']}м)\n"
         f"📅 24ч: {settings['day_drop']}%\n"
+        f"📆 7 дней: {'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}\n"
+        f"🗓 30 дней: {'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}\n"
         f"💰 Объём: {settings['min_volume']:,}$\n"
         f"🛑 В памяти дампов: {len(daily_memory)}"
     , parse_mode="HTML")
@@ -104,6 +132,31 @@ async def fetch_prices():
                 if response.status == 200: return await response.json()
     except Exception as e: print(f"Ошибка API: {e}", flush=True)
     return []
+
+# Функция для запроса свечей (7 и 30 дней)
+async def get_long_term_changes(symbol, current_price):
+    url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1d&limit=31"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if not data: return 0.0, 0.0
+                    
+                    # Если монета новая, берем самую старую доступную свечу
+                    idx_7 = -8 if len(data) >= 8 else 0
+                    idx_30 = -31 if len(data) >= 31 else 0
+                    
+                    p_7 = float(data[idx_7][1]) # Цена открытия 7 дней назад
+                    p_30 = float(data[idx_30][1]) # Цена открытия 30 дней назад
+                    
+                    c_7 = ((current_price - p_7) / p_7) * 100
+                    c_30 = ((current_price - p_30) / p_30) * 100
+                    
+                    return c_7, c_30
+    except:
+        pass
+    return 0.0, 0.0
 
 async def parser_task():
     print("--- Фоновый парсер запущен ---", flush=True)
@@ -143,11 +196,10 @@ async def parser_task():
                             is_repeat = False
                             
                             if pair in daily_memory:
-                                # Минимальная пауза от спама (чтобы не слал сообщения каждую секунду)
                                 if (now - daily_memory[pair]["last_msg"]) < cooldown_sec:
                                     should_alert = False
                                 else:
-                                    # Условие x2: упасть еще сильнее от цены ПРЕДЫДУЩЕГО сигнала
+                                    # Условие x2
                                     req_drop = settings["percent"] * 2
                                     threshold = daily_memory[pair]["price"] * (1 - (req_drop / 100))
                                     if price <= threshold:
@@ -156,23 +208,35 @@ async def parser_task():
                                         should_alert = False
                             
                             if should_alert:
-                                daily_memory[pair] = {
-                                    "time": daily_memory[pair]["time"] if pair in daily_memory else now,
-                                    "price": price,
-                                    "last_msg": now
-                                }
+                                # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ
+                                ch_7, ch_30 = await get_long_term_changes(pair, price)
                                 
-                                label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
-                                await bot.send_message(
-                                    settings["chat_id"],
-                                    f"🚨 <b>ДАМП: {pair}</b>\n{label}"
-                                    f"📉 В окне: <b>-{drop:.2f}%</b>\n"
-                                    f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
-                                    f"💵 Было (пик): <code>{max_p}</code>\n"
-                                    f"💸 Стало (тек): <code>{price}</code>\n"
-                                    f"💰 Объём: <b>{int(vol):,}$</b>",
-                                    parse_mode="HTML"
-                                )
+                                # Применяем фильтры (если включены и падение больше заданного)
+                                if settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
+                                    should_alert = False
+                                elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
+                                    should_alert = False
+                                
+                                if should_alert:
+                                    daily_memory[pair] = {
+                                        "time": daily_memory[pair]["time"] if pair in daily_memory else now,
+                                        "price": price,
+                                        "last_msg": now
+                                    }
+                                    
+                                    label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
+                                    await bot.send_message(
+                                        settings["chat_id"],
+                                        f"🚨 <b>ДАМП: {pair}</b>\n{label}"
+                                        f"📉 В окне: <b>-{drop:.2f}%</b>\n"
+                                        f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
+                                        f"📆 За 7 дней: <b>{ch_7:.2f}%</b>\n"
+                                        f"🗓 За 30 дней: <b>{ch_30:.2f}%</b>\n"
+                                        f"💵 Было (пик): <code>{max_p}</code>\n"
+                                        f"💸 Стало (тек): <code>{price}</code>\n"
+                                        f"💰 Объём: <b>{int(vol):,}$</b>",
+                                        parse_mode="HTML"
+                                    )
                     history.append(price)
         except Exception as e: print(f"Ошибка парсера: {e}", flush=True)
         await asyncio.sleep(settings["check_interval"])
