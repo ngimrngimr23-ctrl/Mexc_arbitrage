@@ -20,7 +20,7 @@ settings = {
     "week_drop": 0.0,      # МАКС. падение за 7 дней (0 - выключено)
     "month_drop": 0.0,     # МАКС. падение за 30 дней (0 - выключено)
     "chat_id": None,
-    "channel_id": None     # ID или @username канала для дублирования
+    "channel_id": os.environ.get("CHANNEL_ID", None) # Берет канал из настроек Render
 }
 
 price_history = {}
@@ -227,7 +227,6 @@ async def parser_task():
                                     
                                     label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
                                     
-                                    # Формируем сообщение (название монеты обернуто в тег <code> для копирования по клику)
                                     msg_text = (
                                         f"🚨 <b>ДАМП:</b> <code>{pair}</code>\n{label}"
                                         f"📉 В окне: <b>-{drop:.2f}%</b>\n"
@@ -239,10 +238,10 @@ async def parser_task():
                                         f"💰 Объём: <b>{int(vol):,}$</b>"
                                     )
                                     
-                                    # Отправляем сообщение тебе в личку
+                                    # Отправляем в личку
                                     await bot.send_message(settings["chat_id"], msg_text, parse_mode="HTML")
                                     
-                                    # Отправляем в канал, если он настроен
+                                    # Отправляем в канал
                                     if settings["channel_id"]:
                                         try:
                                             await bot.send_message(settings["channel_id"], msg_text, parse_mode="HTML")
