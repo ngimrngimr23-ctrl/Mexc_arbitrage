@@ -9,8 +9,6 @@ import os
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = "8145739398:AAG3dl79hQnSsTe1KoYGt9hvaaUsR3XXllY"
-# Впиши сюда юзернейм твоего канала с @ или его числовой ID (бот должен быть админом в канале)
-CHANNEL_ID = "@твой_канал" 
 
 settings = {
     "percent": 5.0,        # Порог падения в окне (%)
@@ -21,7 +19,8 @@ settings = {
     "cooldown_min": 5,     # Минимальная пауза от спама (мин)
     "week_drop": 0.0,      # МАКС. падение за 7 дней (0 - выключено)
     "month_drop": 0.0,     # МАКС. падение за 30 дней (0 - выключено)
-    "chat_id": None
+    "chat_id": None,       # ID админа (куда пишутся логи и команды)
+    "channel_id": None     # ID или юзернейм канала для дублирования сигналов
 }
 
 price_history = {}
@@ -42,7 +41,8 @@ async def start_cmd(message: types.Message):
         f"📅 Порог 24ч: <b>{settings['day_drop']}%</b>\n"
         f"📆 Фильтр 7д: <b>{'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}</b>\n"
         f"🗓 Фильтр 30д: <b>{'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}</b>\n"
-        f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n\n"
+        f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n"
+        f"📢 Канал: <b>{settings['channel_id'] or 'Не задан'}</b>\n\n"
         "⚙️ <b>Команды:</b>\n"
         "/p 5 — % падения в окне\n"
         "/d 5 — % падения за 24ч\n"
@@ -51,8 +51,18 @@ async def start_cmd(message: types.Message):
         "/t 10 — окно (мин)\n"
         "/v 200000 — объем $\n"
         "/b BTC — в ЧС\n"
+        "/channel @имя_канала — куда дублировать сигналы (пусто = выкл)\n"
         "/s — статус"
     , parse_mode="HTML")
+
+@dp.message(Command("channel"))
+async def set_channel(message: types.Message, command: CommandObject):
+    if command.args:
+        settings["channel_id"] = command.args
+        await message.answer(f"✅ Канал для сигналов установлен: <b>{command.args}</b>\n<i>Не забудь сделать бота администратором в этом канале!</i>", parse_mode="HTML")
+    else:
+        settings["channel_id"] = None
+        await message.answer("✅ Дублирование в канал <b>ОТКЛЮЧЕНО</b>", parse_mode="HTML")
 
 @dp.message(Command("p"))
 async def set_percent(message: types.Message, command: CommandObject):
@@ -121,6 +131,7 @@ async def status_cmd(message: types.Message):
         f"📆 7 дней: {'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}\n"
         f"🗓 30 дней: {'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}\n"
         f"💰 Объём: {settings['min_volume']:,}$\n"
+        f"📢 Канал: {settings['channel_id'] or 'Не задан'}\n"
         f"🛑 В памяти дампов: {len(daily_memory)}"
     , parse_mode="HTML")
 
@@ -246,12 +257,12 @@ async def parser_task():
                                     # 1. Отправляем в чат админа (куда написали /start)
                                     await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
                                     
-                                    # 2. Дублируем в канал (если указан CHANNEL_ID)
-                                    if CHANNEL_ID and CHANNEL_ID != "@твой_канал":
+                                    # 2. Дублируем в канал (если он задан через /channel)
+                                    if settings["channel_id"]:
                                         try:
-                                            await bot.send_message(CHANNEL_ID, alert_text, parse_mode="HTML")
+                                            await bot.send_message(settings["channel_id"], alert_text, parse_mode="HTML")
                                         except Exception as e:
-                                            print(f"Не удалось отправить в канал: {e}", flush=True)
+                                            print(f"Не удалось отправить в канал {settings['channel_id']}: {e}", flush=True)
 
                     history.append(price)
         except Exception as e: print(f"Ошибка парсера: {e}", flush=True)
@@ -274,4 +285,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-            
+    
