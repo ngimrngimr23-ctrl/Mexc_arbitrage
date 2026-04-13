@@ -17,6 +17,7 @@ settings = {
     "min_volume": 100000,  # Мин. объем 24ч ($)
     "day_drop": 0.0,       # Порог падения за 24ч (%)
     "cooldown_min": 5,     # Минимальная пауза от спама (мин)
+    "week_min_drop": 0.0,  # МИН. порог падения за 7 дней (0 - выключено)
     "week_drop": 0.0,      # МАКС. падение за 7 дней (0 - выключено)
     "month_drop": 0.0,     # МАКС. падение за 30 дней (0 - выключено)
     "chat_id": None,       # ID админа (куда пишутся логи и команды)
@@ -39,13 +40,15 @@ async def start_cmd(message: types.Message):
         "🚀 <b>Бот-сканер MEXC запущен</b>\n\n"
         f"📉 Порог окна: <b>{settings['percent']}%</b>\n"
         f"📅 Порог 24ч: <b>{settings['day_drop']}%</b>\n"
-        f"📆 Фильтр 7д: <b>{'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}</b>\n"
-        f"🗓 Фильтр 30д: <b>{'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}</b>\n"
+        f"📆 Мин. порог 7д: <b>{settings['week_min_drop']}%</b>\n"
+        f"📆 Фильтр макс 7д: <b>{'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}</b>\n"
+        f"🗓 Фильтр макс 30д: <b>{'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}</b>\n"
         f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n"
         f"📢 Канал: <b>{settings['channel_id'] or 'Не задан'}</b>\n\n"
         "⚙️ <b>Команды:</b>\n"
         "/p 5 — % падения в окне\n"
-        "/d 5 — % падения за 24ч\n"
+        "/d 5 — мин. % падения за 24ч\n"
+        "/wmin 10 — мин. % падения за 7 дней (0=выкл)\n"
         "/w 30 — скрыть, если упала >30% за 7 дней (0=выкл)\n"
         "/m 50 — скрыть, если упала >50% за 30 дней (0=выкл)\n"
         "/t 10 — окно (мин)\n"
@@ -80,15 +83,26 @@ async def set_day_drop(message: types.Message, command: CommandObject):
         await message.answer(f"✅ Фильтр 24ч: <b>{settings['day_drop']}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /d 5")
 
+@dp.message(Command("wmin"))
+async def set_week_min_drop(message: types.Message, command: CommandObject):
+    try:
+        val = float(command.args.replace(',', '.'))
+        settings["week_min_drop"] = -abs(val) if val != 0 else 0.0
+        if val == 0:
+            await message.answer("✅ Мин. порог падения за 7 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
+        else:
+            await message.answer(f"✅ Порог за 7 дней: монета должна упасть минимум на <b>{settings['week_min_drop']}%</b>", parse_mode="HTML")
+    except: await message.answer("❌ Ошибка. Пример: /wmin 10")
+
 @dp.message(Command("w"))
 async def set_week_drop(message: types.Message, command: CommandObject):
     try:
         val = abs(float(command.args.replace(',', '.')))
         settings["week_drop"] = val
         if val == 0:
-            await message.answer("✅ Фильтр 7 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
+            await message.answer("✅ Макс. фильтр 7 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
         else:
-            await message.answer(f"✅ Фильтр 7 дней: скрывать монеты, упавшие больше чем на <b>-{val}%</b>", parse_mode="HTML")
+            await message.answer(f"✅ Макс. фильтр 7 дней: скрывать монеты, упавшие больше чем на <b>-{val}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /w 30 (для отключения введи /w 0)")
 
 @dp.message(Command("m"))
@@ -97,9 +111,9 @@ async def set_month_drop(message: types.Message, command: CommandObject):
         val = abs(float(command.args.replace(',', '.')))
         settings["month_drop"] = val
         if val == 0:
-            await message.answer("✅ Фильтр 30 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
+            await message.answer("✅ Макс. фильтр 30 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
         else:
-            await message.answer(f"✅ Фильтр 30 дней: скрывать монеты, упавшие больше чем на <b>-{val}%</b>", parse_mode="HTML")
+            await message.answer(f"✅ Макс. фильтр 30 дней: скрывать монеты, упавшие больше чем на <b>-{val}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /m 50 (для отключения введи /m 0)")
 
 @dp.message(Command("t"))
@@ -127,9 +141,10 @@ async def status_cmd(message: types.Message):
     await message.answer(
         "📊 <b>Статус</b>\n"
         f"📉 Окно: {settings['percent']}% ({settings['window_min']}м)\n"
-        f"📅 24ч: {settings['day_drop']}%\n"
-        f"📆 7 дней: {'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}\n"
-        f"🗓 30 дней: {'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}\n"
+        f"📅 24ч (мин): {settings['day_drop']}%\n"
+        f"📆 7 дней (мин): {settings['week_min_drop']}%\n"
+        f"📆 7 дней (макс): {'Выкл' if settings['week_drop'] == 0 else f'-{settings['week_drop']}%'}\n"
+        f"🗓 30 дней (макс): {'Выкл' if settings['month_drop'] == 0 else f'-{settings['month_drop']}%'}\n"
         f"💰 Объём: {settings['min_volume']:,}$\n"
         f"📢 Канал: {settings['channel_id'] or 'Не задан'}\n"
         f"🛑 В памяти дампов: {len(daily_memory)}"
@@ -203,7 +218,7 @@ async def parser_task():
                         if pair in daily_memory and (now - daily_memory[pair]["time"]) >= 86400:
                             del daily_memory[pair]
 
-                        # Проверка условий
+                        # Проверка базовых условий
                         if drop >= settings["percent"] and ch_24 <= settings["day_drop"]:
                             should_alert = True
                             is_repeat = False
@@ -224,11 +239,13 @@ async def parser_task():
                                 # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ
                                 ch_7, ch_30 = await get_long_term_changes(pair, price)
                                 
-                                # Применяем фильтры (если включены и падение больше заданного)
-                                if settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
-                                    should_alert = False
+                                # Применяем дополнительные фильтры
+                                if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
+                                    should_alert = False # Упала недостаточно за неделю
+                                elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
+                                    should_alert = False # Упала слишком сильно за неделю (отсев)
                                 elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
-                                    should_alert = False
+                                    should_alert = False # Упала слишком сильно за месяц
                                 
                                 if should_alert:
                                     daily_memory[pair] = {
@@ -242,7 +259,7 @@ async def parser_task():
                                     # Убираем USDT из названия монеты для уведомления
                                     base_coin = pair.replace("USDT", "")
                                     
-                                    # Формируем текст сообщения (тег <code> делает текст копируемым по нажатию)
+                                    # Формируем текст сообщения
                                     alert_text = (
                                         f"🚨 <b>ДАМП: <code>{base_coin}</code></b>\n{label}"
                                         f"📉 В окне: <b>-{drop:.2f}%</b>\n"
@@ -254,10 +271,10 @@ async def parser_task():
                                         f"💰 Объём: <b>{int(vol):,}$</b>"
                                     )
                                     
-                                    # 1. Отправляем в чат админа (куда написали /start)
+                                    # 1. Отправляем в чат админа
                                     await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
                                     
-                                    # 2. Дублируем в канал (если он задан через /channel)
+                                    # 2. Дублируем в канал
                                     if settings["channel_id"]:
                                         try:
                                             await bot.send_message(settings["channel_id"], alert_text, parse_mode="HTML")
