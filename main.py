@@ -19,6 +19,7 @@ settings = {
     "cooldown_min": 5,     # Минимальная пауза от спама (мин)
     "week_min_drop": 0.0,  # МИН. порог падения за 7 дней (0 - выключено)
     "week_drop": 0.0,      # МАКС. падение за 7 дней (0 - выключено)
+    "month_min_drop": 0.0, # МИН. порог падения за 30 дней (0 - выключено)
     "month_drop": 0.0,     # МАКС. падение за 30 дней (0 - выключено)
     "chat_id": None,       # ID админа (куда пишутся логи и команды)
     "channel_id": None     # ID или юзернейм канала для дублирования сигналов
@@ -41,6 +42,7 @@ async def start_cmd(message: types.Message):
         f"📉 Порог окна: <b>{settings['percent']}%</b>\n"
         f"📅 Порог 24ч: <b>{settings['day_drop']}%</b>\n"
         f"📆 Мин. порог 7д: <b>{settings['week_min_drop']}%</b>\n"
+        f"🗓 Мин. порог 30д: <b>{settings['month_min_drop']}%</b>\n"
         f"📆 Фильтр макс 7д: <b>{'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}</b>\n"
         f"🗓 Фильтр макс 30д: <b>{'Выкл' if settings['month_drop'] == 0 else f'Макс -{settings['month_drop']}%'}</b>\n"
         f"💰 Мин. объём: <b>{settings['min_volume']:,}$</b>\n"
@@ -49,6 +51,7 @@ async def start_cmd(message: types.Message):
         "/p 5 — % падения в окне\n"
         "/d 5 — мин. % падения за 24ч\n"
         "/wmin 10 — мин. % падения за 7 дней (0=выкл)\n"
+        "/mmin 20 — мин. % падения за 30 дней (0=выкл)\n"
         "/w 30 — скрыть, если упала >30% за 7 дней (0=выкл)\n"
         "/m 50 — скрыть, если упала >50% за 30 дней (0=выкл)\n"
         "/t 10 — окно (мин)\n"
@@ -93,6 +96,17 @@ async def set_week_min_drop(message: types.Message, command: CommandObject):
         else:
             await message.answer(f"✅ Порог за 7 дней: монета должна упасть минимум на <b>{settings['week_min_drop']}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /wmin 10")
+
+@dp.message(Command("mmin"))
+async def set_month_min_drop(message: types.Message, command: CommandObject):
+    try:
+        val = float(command.args.replace(',', '.'))
+        settings["month_min_drop"] = -abs(val) if val != 0 else 0.0
+        if val == 0:
+            await message.answer("✅ Мин. порог падения за 30 дней <b>ВЫКЛЮЧЕН</b>", parse_mode="HTML")
+        else:
+            await message.answer(f"✅ Порог за 30 дней: монета должна упасть минимум на <b>{settings['month_min_drop']}%</b>", parse_mode="HTML")
+    except: await message.answer("❌ Ошибка. Пример: /mmin 20")
 
 @dp.message(Command("w"))
 async def set_week_drop(message: types.Message, command: CommandObject):
@@ -143,6 +157,7 @@ async def status_cmd(message: types.Message):
         f"📉 Окно: {settings['percent']}% ({settings['window_min']}м)\n"
         f"📅 24ч (мин): {settings['day_drop']}%\n"
         f"📆 7 дней (мин): {settings['week_min_drop']}%\n"
+        f"🗓 30 дней (мин): {settings['month_min_drop']}%\n"
         f"📆 7 дней (макс): {'Выкл' if settings['week_drop'] == 0 else f'-{settings['week_drop']}%'}\n"
         f"🗓 30 дней (макс): {'Выкл' if settings['month_drop'] == 0 else f'-{settings['month_drop']}%'}\n"
         f"💰 Объём: {settings['min_volume']:,}$\n"
@@ -242,6 +257,8 @@ async def parser_task():
                                 # Применяем дополнительные фильтры
                                 if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
                                     should_alert = False # Упала недостаточно за неделю
+                                elif settings["month_min_drop"] != 0 and ch_30 > settings["month_min_drop"]:
+                                    should_alert = False # Упала недостаточно за месяц
                                 elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
                                     should_alert = False # Упала слишком сильно за неделю (отсев)
                                 elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
@@ -302,4 +319,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                                    
+    
