@@ -251,8 +251,8 @@ async def parser_task():
                                         should_alert = False
                             
                             if should_alert:
-                                # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ
-                                ch_7, ch_30 = await get_long_term_changes(pair, price)
+                                # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ (считаем от max_p до начала дампа)
+                                ch_7, ch_30 = await get_long_term_changes(pair, max_p)
                                 
                                 # Применяем дополнительные фильтры
                                 if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
@@ -281,8 +281,8 @@ async def parser_task():
                                         f"🚨 <b>ДАМП: <code>{base_coin}</code></b>\n{label}"
                                         f"📉 В окне: <b>-{drop:.2f}%</b>\n"
                                         f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
-                                        f"📆 За 7 дней: <b>{ch_7:.2f}%</b>\n"
-                                        f"🗓 За 30 дней: <b>{ch_30:.2f}%</b>\n"
+                                        f"📆 За 7 дней (до дампа): <b>{ch_7:.2f}%</b>\n"
+                                        f"🗓 За 30 дней (до дампа): <b>{ch_30:.2f}%</b>\n"
                                         f"💵 Было (пик): <code>{max_p}</code>\n"
                                         f"💸 Стало (тек): <code>{price}</code>\n"
                                         f"💰 Объём: <b>{int(vol):,}$</b>"
