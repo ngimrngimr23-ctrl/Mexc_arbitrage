@@ -11,23 +11,27 @@ import os
 BOT_TOKEN = "8145739398:AAG3dl79hQnSsTe1KoYGt9hvaaUsR3XXllY"
 
 settings = {
-    "percent": 5.0,        # Порог падения в окне (%)
-    "window_min": 15,      # Окно анализа (мин)
-    "check_interval": 30,  # Как часто проверять (сек)
-    "min_volume": 100000,  # Мин. объем 24ч ($)
-    "day_drop": 0.0,       # Порог падения за 24ч (%)
-    "cooldown_min": 5,     # Минимальная пауза от спама (мин)
-    "week_min_drop": 0.0,  # МИН. порог падения за 7 дней (0 - выключено)
-    "week_drop": 0.0,      # МАКС. падение за 7 дней (0 - выключено)
-    "month_min_drop": 0.0, # МИН. порог падения за 30 дней (0 - выключено)
-    "month_drop": 0.0,     # МАКС. падение за 30 дней (0 - выключено)
-    "chat_id": None,       # ID админа (куда пишутся логи и команды)
-    "channel_id": None     # ID или юзернейм канала для дублирования сигналов
+    "percent": 5.0,          # Порог падения в окне (%)
+    "window_min": 15,        # Окно анализа (мин)
+    "check_interval": 30,    # Как часто проверять (сек)
+    "min_volume": 100000,    # Мин. объем 24ч ($)
+    "day_drop": 0.0,         # Порог падения за 24ч (%)
+    "cooldown_min": 5,       # Минимальная пауза от спама (мин)
+    "week_min_drop": 0.0,    # МИН. порог падения за 7 дней (0 - выключено)
+    "week_drop": 0.0,        # МАКС. падение за 7 дней (0 - выключено)
+    "month_min_drop": 0.0,   # МИН. порог падения за 30 дней (0 - выключено)
+    "month_drop": 0.0,       # МАКС. падение за 30 дней (0 - выключено)
+    "chat_id": None,         # ID админа (куда пишутся логи и команды)
+    "channel_id": None       # ID или юзернейм канала для дублирования сигналов
 }
 
+# ВАЖНО: теперь храним (timestamp, price) вместо просто price.
+# Это позволяет считать падение по РЕАЛЬНОМУ времени, а не по количеству
+# накопленных точек — раньше из-за этого окно "15 минут" могло на самом деле
+# означать "сколько успели накопить с момента старта отслеживания этой пары".
 price_history = {}
 blacklist = set()
-daily_memory = {} 
+daily_memory = {}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -59,7 +63,7 @@ async def start_cmd(message: types.Message):
         "/b BTC — в ЧС\n"
         "/channel @имя_канала — куда дублировать сигналы (пусто = выкл)\n"
         "/s — статус"
-    , parse_mode="HTML")
+        , parse_mode="HTML")
 
 @dp.message(Command("channel"))
 async def set_channel(message: types.Message, command: CommandObject):
@@ -82,7 +86,7 @@ async def set_percent(message: types.Message, command: CommandObject):
 async def set_day_drop(message: types.Message, command: CommandObject):
     try:
         val = float(command.args.replace(',', '.'))
-        settings["day_drop"] = -abs(val) 
+        settings["day_drop"] = -abs(val)
         await message.answer(f"✅ Фильтр 24ч: <b>{settings['day_drop']}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /d 5")
 
@@ -162,8 +166,9 @@ async def status_cmd(message: types.Message):
         f"🗓 30 дней (макс): {'Выкл' if settings['month_drop'] == 0 else f'-{settings['month_drop']}%'}\n"
         f"💰 Объём: {settings['min_volume']:,}$\n"
         f"📢 Канал: {settings['channel_id'] or 'Не задан'}\n"
-        f"🛑 В памяти дампов: {len(daily_memory)}"
-    , parse_mode="HTML")
+        f"🛑 В памяти дампов: {len(daily_memory)}\n"
+        f"📡 Отслеживается пар: {len(price_history)}"
+        , parse_mode="HTML")
 
 # ================= API & LOGIC =================
 
@@ -185,17 +190,13 @@ async def get_long_term_changes(symbol, current_price):
                 if resp.status == 200:
                     data = await resp.json()
                     if not data: return 0.0, 0.0
-                    
                     # Если монета новая, берем самую старую доступную свечу
                     idx_7 = -8 if len(data) >= 8 else 0
                     idx_30 = -31 if len(data) >= 31 else 0
-                    
-                    p_7 = float(data[idx_7][1]) # Цена открытия 7 дней назад
+                    p_7 = float(data[idx_7][1])   # Цена открытия 7 дней назад
                     p_30 = float(data[idx_30][1]) # Цена открытия 30 дней назад
-                    
                     c_7 = ((current_price - p_7) / p_7) * 100
                     c_30 = ((current_price - p_30) / p_30) * 100
-                    
                     return c_7, c_30
     except:
         pass
@@ -208,12 +209,16 @@ async def parser_task():
             if settings["chat_id"]:
                 data = await fetch_prices()
                 now = time.time()
-                max_pts = int((settings["window_min"] * 60) / settings["check_interval"])
+                window_sec = settings["window_min"] * 60
+                # maxlen с запасом (+20%), чтобы хранить чуть больше точек, чем
+                # нужно по времени — на случай пропущенных циклов API.
+                max_pts = max(int((window_sec / settings["check_interval"]) * 1.2), 5)
                 cooldown_sec = settings["cooldown_min"] * 60
 
                 for item in data:
                     pair = item['symbol']
                     if not pair.endswith("USDT") or pair in blacklist: continue
+
                     try:
                         vol = float(item['quoteVolume'])
                         if vol < settings["min_volume"]: continue
@@ -225,80 +230,107 @@ async def parser_task():
                         price_history[pair] = deque(maxlen=max_pts)
 
                     history = price_history[pair]
-                    if len(history) > 0:
-                        max_p = max(history)
+
+                    # --- ИСПРАВЛЕНИЕ: считаем падение по РЕАЛЬНОМУ времени ---
+                    # Раньше "максимум в окне" брался из всей очереди, какой бы
+                    # короткой она ни была. Из-за этого если бот только начал
+                    # отслеживать пару (рестарт, или пара только что прошла
+                    # фильтр по объёму), первая же сохранённая цена (которая
+                    # могла быть зафиксирована час(ы) назад) считалась "пиком
+                    # за 15 минут", и падение к текущей цене ложно засчитывалось
+                    # как дамп "в окне".
+                    #
+                    # Теперь:
+                    # 1) Берём из истории только точки не старше window_sec.
+                    # 2) Сигнал выдаём только если у нас есть НЕПРЕРЫВНОЕ
+                    #    покрытие всего окна, т.е. самая старая точка в очереди
+                    #    лежит ДАЛЬШЕ, чем window_sec назад (значит, мы реально
+                    #    наблюдали эту пару всё окно целиком).
+                    relevant = [p for (t, p) in history if (now - t) <= window_sec]
+
+                    have_full_window = (
+                        len(history) > 0
+                        and (now - history[0][0]) >= window_sec
+                    )
+
+                    if have_full_window and relevant:
+                        max_p = max(relevant)
                         drop = ((max_p - price) / max_p) * 100
-                        
-                        # Очистка старой памяти (старше 24ч)
-                        if pair in daily_memory and (now - daily_memory[pair]["time"]) >= 86400:
-                            del daily_memory[pair]
+                    else:
+                        # Недостаточно реальной истории за окно — не считаем
+                        # это дампом "в окне", просто копим данные дальше.
+                        max_p = price
+                        drop = 0.0
 
-                        # Проверка базовых условий
-                        if drop >= settings["percent"] and ch_24 <= settings["day_drop"]:
-                            should_alert = True
-                            is_repeat = False
-                            
-                            if pair in daily_memory:
-                                if (now - daily_memory[pair]["last_msg"]) < cooldown_sec:
-                                    should_alert = False
+                    # Очистка старой памяти (старше 24ч)
+                    if pair in daily_memory and (now - daily_memory[pair]["time"]) >= 86400:
+                        del daily_memory[pair]
+
+                    # Проверка базовых условий
+                    if have_full_window and drop >= settings["percent"] and ch_24 <= settings["day_drop"]:
+                        should_alert = True
+                        is_repeat = False
+
+                        if pair in daily_memory:
+                            if (now - daily_memory[pair]["last_msg"]) < cooldown_sec:
+                                should_alert = False
+                            else:
+                                # Условие x2
+                                req_drop = settings["percent"] * 2
+                                threshold = daily_memory[pair]["price"] * (1 - (req_drop / 100))
+                                if price <= threshold:
+                                    is_repeat = True
                                 else:
-                                    # Условие x2
-                                    req_drop = settings["percent"] * 2
-                                    threshold = daily_memory[pair]["price"] * (1 - (req_drop / 100))
-                                    if price <= threshold:
-                                        is_repeat = True
-                                    else:
-                                        should_alert = False
-                            
-                            if should_alert:
-                                # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ (считаем от max_p до начала дампа)
-                                ch_7, ch_30 = await get_long_term_changes(pair, max_p)
-                                
-                                # Применяем дополнительные фильтры
-                                if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
-                                    should_alert = False # Упала недостаточно за неделю
-                                elif settings["month_min_drop"] != 0 and ch_30 > settings["month_min_drop"]:
-                                    should_alert = False # Упала недостаточно за месяц
-                                elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
-                                    should_alert = False # Упала слишком сильно за неделю (отсев)
-                                elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
-                                    should_alert = False # Упала слишком сильно за месяц
-                                
-                                if should_alert:
-                                    daily_memory[pair] = {
-                                        "time": daily_memory[pair]["time"] if pair in daily_memory else now,
-                                        "price": price,
-                                        "last_msg": now
-                                    }
-                                    
-                                    label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
-                                    
-                                    # Убираем USDT из названия монеты для уведомления
-                                    base_coin = pair.replace("USDT", "")
-                                    
-                                    # Формируем текст сообщения
-                                    alert_text = (
-                                        f"🚨 <b>ДАМП: <code>{base_coin}</code></b>\n{label}"
-                                        f"📉 В окне: <b>-{drop:.2f}%</b>\n"
-                                        f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
-                                        f"📆 За 7 дней (до дампа): <b>{ch_7:.2f}%</b>\n"
-                                        f"🗓 За 30 дней (до дампа): <b>{ch_30:.2f}%</b>\n"
-                                        f"💵 Было (пик): <code>{max_p}</code>\n"
-                                        f"💸 Стало (тек): <code>{price}</code>\n"
-                                        f"💰 Объём: <b>{int(vol):,}$</b>"
-                                    )
-                                    
-                                    # 1. Отправляем в чат админа
-                                    await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
-                                    
-                                    # 2. Дублируем в канал
-                                    if settings["channel_id"]:
-                                        try:
-                                            await bot.send_message(settings["channel_id"], alert_text, parse_mode="HTML")
-                                        except Exception as e:
-                                            print(f"Не удалось отправить в канал {settings['channel_id']}: {e}", flush=True)
+                                    should_alert = False
 
-                    history.append(price)
+                        if should_alert:
+                            # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ (считаем от max_p до начала дампа)
+                            ch_7, ch_30 = await get_long_term_changes(pair, max_p)
+
+                            # Применяем дополнительные фильтры
+                            if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
+                                should_alert = False   # Упала недостаточно за неделю
+                            elif settings["month_min_drop"] != 0 and ch_30 > settings["month_min_drop"]:
+                                should_alert = False   # Упала недостаточно за месяц
+                            elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
+                                should_alert = False   # Упала слишком сильно за неделю (отсев)
+                            elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
+                                should_alert = False   # Упала слишком сильно за месяц
+
+                            if should_alert:
+                                daily_memory[pair] = {
+                                    "time": daily_memory[pair]["time"] if pair in daily_memory else now,
+                                    "price": price,
+                                    "last_msg": now
+                                }
+
+                                label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
+                                # Убираем USDT из названия монеты для уведомления
+                                base_coin = pair.replace("USDT", "")
+
+                                # Формируем текст сообщения
+                                alert_text = (
+                                    f"🚨 <b>ДАМП: <code>{base_coin}</code></b>\n{label}"
+                                    f"📉 В окне: <b>-{drop:.2f}%</b>\n"
+                                    f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
+                                    f"📆 За 7 дней (до дампа): <b>{ch_7:.2f}%</b>\n"
+                                    f"🗓 За 30 дней (до дампа): <b>{ch_30:.2f}%</b>\n"
+                                    f"💵 Было (пик): <code>{max_p}</code>\n"
+                                    f"💸 Стало (тек): <code>{price}</code>\n"
+                                    f"💰 Объём: <b>{int(vol):,}$</b>"
+                                )
+
+                                # 1. Отправляем в чат админа
+                                await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
+
+                                # 2. Дублируем в канал
+                                if settings["channel_id"]:
+                                    try:
+                                        await bot.send_message(settings["channel_id"], alert_text, parse_mode="HTML")
+                                    except Exception as e:
+                                        print(f"Не удалось отправить в канал {settings['channel_id']}: {e}", flush=True)
+
+                    history.append((now, price))
         except Exception as e: print(f"Ошибка парсера: {e}", flush=True)
         await asyncio.sleep(settings["check_interval"])
 
@@ -313,6 +345,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000)))
     await site.start()
+
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(parser_task())
     await dp.start_polling(bot)
