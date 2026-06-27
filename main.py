@@ -25,10 +25,6 @@ settings = {
     "channel_id": None       # ID или юзернейм канала для дублирования сигналов
 }
 
-# ВАЖНО: теперь храним (timestamp, price) вместо просто price.
-# Это позволяет считать падение по РЕАЛЬНОМУ времени, а не по количеству
-# накопленных точек — раньше из-за этого окно "15 минут" могло на самом деле
-# означать "сколько успели накопить с момента старта отслеживания этой пары".
 price_history = {}
 blacklist = set()
 daily_memory = {}
@@ -181,7 +177,6 @@ async def fetch_prices():
     except Exception as e: print(f"Ошибка API: {e}", flush=True)
     return []
 
-# Функция для запроса свечей (7 и 30 дней)
 async def get_long_term_changes(symbol, current_price):
     url = f"https://api.mexc.com/api/v3/klines?symbol={symbol}&interval=1d&limit=31"
     try:
@@ -190,11 +185,10 @@ async def get_long_term_changes(symbol, current_price):
                 if resp.status == 200:
                     data = await resp.json()
                     if not data: return 0.0, 0.0
-                    # Если монета новая, берем самую старую доступную свечу
                     idx_7 = -8 if len(data) >= 8 else 0
                     idx_30 = -31 if len(data) >= 31 else 0
-                    p_7 = float(data[idx_7][1])   # Цена открытия 7 дней назад
-                    p_30 = float(data[idx_30][1]) # Цена открытия 30 дней назад
+                    p_7 = float(data[idx_7][1])   
+                    p_30 = float(data[idx_30][1]) 
                     c_7 = ((current_price - p_7) / p_7) * 100
                     c_30 = ((current_price - p_30) / p_30) * 100
                     return c_7, c_30
@@ -206,131 +200,107 @@ async def parser_task():
     print("--- Фоновый парсер запущен ---", flush=True)
     while True:
         try:
-            if settings["chat_id"]:
-                data = await fetch_prices()
-                now = time.time()
-                window_sec = settings["window_min"] * 60
-                # maxlen с запасом (+20%), чтобы хранить чуть больше точек, чем
-                # нужно по времени — на случай пропущенных циклов API.
-                max_pts = max(int((window_sec / settings["check_interval"]) * 1.2), 5)
-                cooldown_sec = settings["cooldown_min"] * 60
+            # Изменено: парсер работает всегда, независимо от chat_id
+            data = await fetch_prices()
+            now = time.time()
+            window_sec = settings["window_min"] * 60
+            max_pts = max(int((window_sec / settings["check_interval"]) * 1.2), 5)
+            cooldown_sec = settings["cooldown_min"] * 60
 
-                for item in data:
-                    pair = item['symbol']
-                    if not pair.endswith("USDT") or pair in blacklist: continue
+            for item in data:
+                pair = item['symbol']
+                if not pair.endswith("USDT") or pair in blacklist: continue
 
-                    try:
-                        vol = float(item['quoteVolume'])
-                        if vol < settings["min_volume"]: continue
-                        price = float(item['lastPrice'])
-                        ch_24 = float(item['priceChangePercent']) * 100
-                    except: continue
+                try:
+                    vol = float(item['quoteVolume'])
+                    if vol < settings["min_volume"]: continue
+                    price = float(item['lastPrice'])
+                    ch_24 = float(item['priceChangePercent']) * 100
+                except: continue
 
-                    if pair not in price_history or price_history[pair].maxlen != max_pts:
-                        price_history[pair] = deque(maxlen=max_pts)
+                if pair not in price_history or price_history[pair].maxlen != max_pts:
+                    price_history[pair] = deque(maxlen=max_pts)
 
-                    history = price_history[pair]
+                history = price_history[pair]
+                relevant = [p for (t, p) in history if (now - t) <= window_sec]
 
-                    # --- ИСПРАВЛЕНИЕ: считаем падение по РЕАЛЬНОМУ времени ---
-                    # Раньше "максимум в окне" брался из всей очереди, какой бы
-                    # короткой она ни была. Из-за этого если бот только начал
-                    # отслеживать пару (рестарт, или пара только что прошла
-                    # фильтр по объёму), первая же сохранённая цена (которая
-                    # могла быть зафиксирована час(ы) назад) считалась "пиком
-                    # за 15 минут", и падение к текущей цене ложно засчитывалось
-                    # как дамп "в окне".
-                    #
-                    # Теперь:
-                    # 1) Берём из истории только точки не старше window_sec.
-                    # 2) Сигнал выдаём только если у нас есть НЕПРЕРЫВНОЕ
-                    #    покрытие всего окна, т.е. самая старая точка в очереди
-                    #    лежит ДАЛЬШЕ, чем window_sec назад (значит, мы реально
-                    #    наблюдали эту пару всё окно целиком).
-                    relevant = [p for (t, p) in history if (now - t) <= window_sec]
+                have_full_window = (
+                    len(history) > 0
+                    and (now - history[0][0]) >= window_sec
+                )
 
-                    have_full_window = (
-                        len(history) > 0
-                        and (now - history[0][0]) >= window_sec
-                    )
+                if have_full_window and relevant:
+                    max_p = max(relevant)
+                    drop = ((max_p - price) / max_p) * 100
+                else:
+                    max_p = price
+                    drop = 0.0
 
-                    if have_full_window and relevant:
-                        max_p = max(relevant)
-                        drop = ((max_p - price) / max_p) * 100
-                    else:
-                        # Недостаточно реальной истории за окно — не считаем
-                        # это дампом "в окне", просто копим данные дальше.
-                        max_p = price
-                        drop = 0.0
+                if pair in daily_memory and (now - daily_memory[pair]["time"]) >= 86400:
+                    del daily_memory[pair]
 
-                    # Очистка старой памяти (старше 24ч)
-                    if pair in daily_memory and (now - daily_memory[pair]["time"]) >= 86400:
-                        del daily_memory[pair]
+                if have_full_window and drop >= settings["percent"] and ch_24 <= settings["day_drop"]:
+                    should_alert = True
+                    is_repeat = False
 
-                    # Проверка базовых условий
-                    if have_full_window and drop >= settings["percent"] and ch_24 <= settings["day_drop"]:
-                        should_alert = True
-                        is_repeat = False
-
-                        if pair in daily_memory:
-                            if (now - daily_memory[pair]["last_msg"]) < cooldown_sec:
-                                should_alert = False
+                    if pair in daily_memory:
+                        if (now - daily_memory[pair]["last_msg"]) < cooldown_sec:
+                            should_alert = False
+                        else:
+                            req_drop = settings["percent"] * 2
+                            threshold = daily_memory[pair]["price"] * (1 - (req_drop / 100))
+                            if price <= threshold:
+                                is_repeat = True
                             else:
-                                # Условие x2
-                                req_drop = settings["percent"] * 2
-                                threshold = daily_memory[pair]["price"] * (1 - (req_drop / 100))
-                                if price <= threshold:
-                                    is_repeat = True
-                                else:
-                                    should_alert = False
+                                should_alert = False
+
+                    if should_alert:
+                        ch_7, ch_30 = await get_long_term_changes(pair, max_p)
+
+                        if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
+                            should_alert = False   
+                        elif settings["month_min_drop"] != 0 and ch_30 > settings["month_min_drop"]:
+                            should_alert = False   
+                        elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
+                            should_alert = False   
+                        elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
+                            should_alert = False   
 
                         if should_alert:
-                            # ЗАПРАШИВАЕМ ИСТОРИЮ ЗА НЕДЕЛЮ И МЕСЯЦ (считаем от max_p до начала дампа)
-                            ch_7, ch_30 = await get_long_term_changes(pair, max_p)
+                            daily_memory[pair] = {
+                                "time": daily_memory[pair]["time"] if pair in daily_memory else now,
+                                "price": price,
+                                "last_msg": now
+                            }
 
-                            # Применяем дополнительные фильтры
-                            if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
-                                should_alert = False   # Упала недостаточно за неделю
-                            elif settings["month_min_drop"] != 0 and ch_30 > settings["month_min_drop"]:
-                                should_alert = False   # Упала недостаточно за месяц
-                            elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
-                                should_alert = False   # Упала слишком сильно за неделю (отсев)
-                            elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
-                                should_alert = False   # Упала слишком сильно за месяц
+                            label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
+                            base_coin = pair.replace("USDT", "")
 
-                            if should_alert:
-                                daily_memory[pair] = {
-                                    "time": daily_memory[pair]["time"] if pair in daily_memory else now,
-                                    "price": price,
-                                    "last_msg": now
-                                }
+                            alert_text = (
+                                f"🚨 <b>ДАМП: <code>{base_coin}</code></b>\n{label}"
+                                f"📉 В окне: <b>-{drop:.2f}%</b>\n"
+                                f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
+                                f"📆 За 7 дней (до дампа): <b>{ch_7:.2f}%</b>\n"
+                                f"🗓 За 30 дней (до дампа): <b>{ch_30:.2f}%</b>\n"
+                                f"💵 Было (пик): <code>{max_p}</code>\n"
+                                f"💸 Стало (тек): <code>{price}</code>\n"
+                                f"💰 Объём: <b>{int(vol):,}$</b>"
+                            )
 
-                                label = "🔥 <b>ПОВТОРНЫЙ ДАМП (x2)</b>\n" if is_repeat else ""
-                                # Убираем USDT из названия монеты для уведомления
-                                base_coin = pair.replace("USDT", "")
+                            # Изменено: Проверка чата перенесена непосредственно на этап отправки сообщения
+                            if settings["chat_id"]:
+                                try:
+                                    await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
+                                except Exception as e:
+                                    print(f"Ошибка отправки сообщения админу: {e}", flush=True)
 
-                                # Формируем текст сообщения
-                                alert_text = (
-                                    f"🚨 <b>ДАМП: <code>{base_coin}</code></b>\n{label}"
-                                    f"📉 В окне: <b>-{drop:.2f}%</b>\n"
-                                    f"📊 За 24 часа: <b>{ch_24:.2f}%</b>\n"
-                                    f"📆 За 7 дней (до дампа): <b>{ch_7:.2f}%</b>\n"
-                                    f"🗓 За 30 дней (до дампа): <b>{ch_30:.2f}%</b>\n"
-                                    f"💵 Было (пик): <code>{max_p}</code>\n"
-                                    f"💸 Стало (тек): <code>{price}</code>\n"
-                                    f"💰 Объём: <b>{int(vol):,}$</b>"
-                                )
+                            if settings["channel_id"]:
+                                try:
+                                    await bot.send_message(settings["channel_id"], alert_text, parse_mode="HTML")
+                                except Exception as e:
+                                    print(f"Не удалось отправить в канал {settings['channel_id']}: {e}", flush=True)
 
-                                # 1. Отправляем в чат админа
-                                await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
-
-                                # 2. Дублируем в канал
-                                if settings["channel_id"]:
-                                    try:
-                                        await bot.send_message(settings["channel_id"], alert_text, parse_mode="HTML")
-                                    except Exception as e:
-                                        print(f"Не удалось отправить в канал {settings['channel_id']}: {e}", flush=True)
-
-                    history.append((now, price))
+                history.append((now, price))
         except Exception as e: print(f"Ошибка парсера: {e}", flush=True)
         await asyncio.sleep(settings["check_interval"])
 
