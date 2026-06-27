@@ -15,7 +15,7 @@ settings = {
     "window_min": 15,        # Окно анализа (мин)
     "check_interval": 30,    # Как часто проверять (сек)
     "min_volume": 100000,    # Мин. объем 24ч ($)
-    "day_drop": 0.0,         # Порог падения за 24ч (%)
+    "day_drop": 999.0,       # ИСПРАВЛЕНО: По умолчанию выключено (999%), чтобы не блочить зеленые монеты
     "cooldown_min": 5,       # Минимальная пауза от спама (мин)
     "week_min_drop": 0.0,    # МИН. порог падения за 7 дней (0 - выключено)
     "week_drop": 0.0,        # МАКС. падение за 7 дней (0 - выключено)
@@ -40,7 +40,7 @@ async def start_cmd(message: types.Message):
     await message.answer(
         "🚀 <b>Бот-сканер MEXC запущен</b>\n\n"
         f"📉 Порог окна: <b>{settings['percent']}%</b>\n"
-        f"📅 Порог 24ч: <b>{settings['day_drop']}%</b>\n"
+        f"📅 Порог 24ч: <b>{'Выкл' if settings['day_drop'] == 999.0 else f'{settings['day_drop']}%'}</b>\n"
         f"📆 Мин. порог 7д: <b>{settings['week_min_drop']}%</b>\n"
         f"🗓 Мин. порог 30д: <b>{settings['month_min_drop']}%</b>\n"
         f"📆 Фильтр макс 7д: <b>{'Выкл' if settings['week_drop'] == 0 else f'Макс -{settings['week_drop']}%'}</b>\n"
@@ -49,7 +49,7 @@ async def start_cmd(message: types.Message):
         f"📢 Канал: <b>{settings['channel_id'] or 'Не задан'}</b>\n\n"
         "⚙️ <b>Команды:</b>\n"
         "/p 5 — % падения в окне\n"
-        "/d 5 — мин. % падения за 24ч\n"
+        "/d 5 — мин. % падения за 24ч (0 = отключить фильтр)\n"
         "/wmin 10 — мин. % падения за 7 дней (0=выкл)\n"
         "/mmin 20 — мин. % падения за 30 дней (0=выкл)\n"
         "/w 30 — скрыть, если упала >30% за 7 дней (0=выкл)\n"
@@ -63,6 +63,7 @@ async def start_cmd(message: types.Message):
 
 @dp.message(Command("channel"))
 async def set_channel(message: types.Message, command: CommandObject):
+    settings["chat_id"] = message.chat.id
     if command.args:
         settings["channel_id"] = command.args
         await message.answer(f"✅ Канал для сигналов установлен: <b>{command.args}</b>\n<i>Не забудь сделать бота администратором в этом канале!</i>", parse_mode="HTML")
@@ -73,22 +74,29 @@ async def set_channel(message: types.Message, command: CommandObject):
 @dp.message(Command("p"))
 async def set_percent(message: types.Message, command: CommandObject):
     try:
+        settings["chat_id"] = message.chat.id  # Улучшение: запоминаем ID при любой настройке
         val = float(command.args.replace(',', '.'))
         settings["percent"] = val
-        await message.answer(f"✅ Порог падения: <b>{val}%</b>", parse_mode="HTML")
+        await message.answer(f"✅ Порог падения в окне: <b>{val}%</b>", parse_mode="HTML")
     except: await message.answer("❌ Ошибка. Пример: /p 7.5")
 
 @dp.message(Command("d"))
 async def set_day_drop(message: types.Message, command: CommandObject):
     try:
+        settings["chat_id"] = message.chat.id
         val = float(command.args.replace(',', '.'))
-        settings["day_drop"] = -abs(val)
-        await message.answer(f"✅ Фильтр 24ч: <b>{settings['day_drop']}%</b>", parse_mode="HTML")
-    except: await message.answer("❌ Ошибка. Пример: /d 5")
+        if val == 0:
+            settings["day_drop"] = 999.0
+            await message.answer("✅ Фильтр 24ч <b>ОТКЛЮЧЕН</b> (уведомления идут по всем монетам)", parse_mode="HTML")
+        else:
+            settings["day_drop"] = -abs(val)
+            await message.answer(f"✅ Фильтр 24ч: монета должна быть в минусе минимум на <b>{settings['day_drop']}%</b>", parse_mode="HTML")
+    except: await message.answer("❌ Ошибка. Пример: /d 5 (или /d 0 для выключения)")
 
 @dp.message(Command("wmin"))
 async def set_week_min_drop(message: types.Message, command: CommandObject):
     try:
+        settings["chat_id"] = message.chat.id
         val = float(command.args.replace(',', '.'))
         settings["week_min_drop"] = -abs(val) if val != 0 else 0.0
         if val == 0:
@@ -100,6 +108,7 @@ async def set_week_min_drop(message: types.Message, command: CommandObject):
 @dp.message(Command("mmin"))
 async def set_month_min_drop(message: types.Message, command: CommandObject):
     try:
+        settings["chat_id"] = message.chat.id
         val = float(command.args.replace(',', '.'))
         settings["month_min_drop"] = -abs(val) if val != 0 else 0.0
         if val == 0:
@@ -111,6 +120,7 @@ async def set_month_min_drop(message: types.Message, command: CommandObject):
 @dp.message(Command("w"))
 async def set_week_drop(message: types.Message, command: CommandObject):
     try:
+        settings["chat_id"] = message.chat.id
         val = abs(float(command.args.replace(',', '.')))
         settings["week_drop"] = val
         if val == 0:
@@ -122,6 +132,7 @@ async def set_week_drop(message: types.Message, command: CommandObject):
 @dp.message(Command("m"))
 async def set_month_drop(message: types.Message, command: CommandObject):
     try:
+        settings["chat_id"] = message.chat.id
         val = abs(float(command.args.replace(',', '.')))
         settings["month_drop"] = val
         if val == 0:
@@ -132,18 +143,21 @@ async def set_month_drop(message: types.Message, command: CommandObject):
 
 @dp.message(Command("t"))
 async def set_time(message: types.Message, command: CommandObject):
+    settings["chat_id"] = message.chat.id
     if command.args and command.args.isdigit():
         settings["window_min"] = int(command.args)
         await message.answer(f"✅ Окно: <b>{command.args} мин</b>", parse_mode="HTML")
 
 @dp.message(Command("v"))
 async def set_volume(message: types.Message, command: CommandObject):
+    settings["chat_id"] = message.chat.id
     if command.args and command.args.isdigit():
         settings["min_volume"] = int(command.args)
         await message.answer(f"✅ Объём: <b>{settings['min_volume']:,}$</b>", parse_mode="HTML")
 
 @dp.message(Command("b"))
 async def add_blacklist(message: types.Message, command: CommandObject):
+    settings["chat_id"] = message.chat.id
     if command.args:
         coin = command.args.upper()
         pair = coin if coin.endswith("USDT") else f"{coin}USDT"
@@ -155,7 +169,7 @@ async def status_cmd(message: types.Message):
     await message.answer(
         "📊 <b>Статус</b>\n"
         f"📉 Окно: {settings['percent']}% ({settings['window_min']}м)\n"
-        f"📅 24ч (мин): {settings['day_drop']}%\n"
+        f"📅 24ч (мин): {'Выкл' if settings['day_drop'] == 999.0 else f'{settings['day_drop']}%'}\n"
         f"📆 7 дней (мин): {settings['week_min_drop']}%\n"
         f"🗓 30 дней (мин): {settings['month_min_drop']}%\n"
         f"📆 7 дней (макс): {'Выкл' if settings['week_drop'] == 0 else f'-{settings['week_drop']}%'}\n"
@@ -200,7 +214,6 @@ async def parser_task():
     print("--- Фоновый парсер запущен ---", flush=True)
     while True:
         try:
-            # Изменено: парсер работает всегда, независимо от chat_id
             data = await fetch_prices()
             now = time.time()
             window_sec = settings["window_min"] * 60
@@ -215,7 +228,7 @@ async def parser_task():
                     vol = float(item['quoteVolume'])
                     if vol < settings["min_volume"]: continue
                     price = float(item['lastPrice'])
-                    ch_24 = float(item['priceChangePercent']) * 100
+                    ch_24 = float(item['priceChangePercent'])  # ИСПРАВЛЕНО: Убрано ошибочное умножение на 100
                 except: continue
 
                 if pair not in price_history or price_history[pair].maxlen != max_pts:
@@ -287,7 +300,6 @@ async def parser_task():
                                 f"💰 Объём: <b>{int(vol):,}$</b>"
                             )
 
-                            # Изменено: Проверка чата перенесена непосредственно на этап отправки сообщения
                             if settings["chat_id"]:
                                 try:
                                     await bot.send_message(settings["chat_id"], alert_text, parse_mode="HTML")
@@ -322,4 +334,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
+                            
