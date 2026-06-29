@@ -15,7 +15,7 @@ settings = {
     "window_min": 15,        # Окно анализа (мин)
     "check_interval": 30,    # Как часто проверять (сек)
     "min_volume": 100000,    # Мин. объем 24ч ($)
-    "day_drop": 999.0,       # ИСПРАВЛЕНО: По умолчанию выключено (999%), чтобы не блочить зеленые монеты
+    "day_drop": 999.0,       # По умолчанию выключено (999%), чтобы не блочить зеленые монеты
     "cooldown_min": 5,       # Минимальная пауза от спама (мин)
     "week_min_drop": 0.0,    # МИН. порог падения за 7 дней (0 - выключено)
     "week_drop": 0.0,        # МАКС. падение за 7 дней (0 - выключено)
@@ -74,7 +74,7 @@ async def set_channel(message: types.Message, command: CommandObject):
 @dp.message(Command("p"))
 async def set_percent(message: types.Message, command: CommandObject):
     try:
-        settings["chat_id"] = message.chat.id  # Улучшение: запоминаем ID при любой настройке
+        settings["chat_id"] = message.chat.id
         val = float(command.args.replace(',', '.'))
         settings["percent"] = val
         await message.answer(f"✅ Порог падения в окне: <b>{val}%</b>", parse_mode="HTML")
@@ -201,8 +201,8 @@ async def get_long_term_changes(symbol, current_price):
                     if not data: return 0.0, 0.0
                     idx_7 = -8 if len(data) >= 8 else 0
                     idx_30 = -31 if len(data) >= 31 else 0
-                    p_7 = float(data[idx_7][1])   
-                    p_30 = float(data[idx_30][1]) 
+                    p_7 = float(data[idx_7][1])
+                    p_30 = float(data[idx_30][1])
                     c_7 = ((current_price - p_7) / p_7) * 100
                     c_30 = ((current_price - p_30) / p_30) * 100
                     return c_7, c_30
@@ -228,7 +228,13 @@ async def parser_task():
                     vol = float(item['quoteVolume'])
                     if vol < settings["min_volume"]: continue
                     price = float(item['lastPrice'])
-                    ch_24 = float(item['priceChangePercent'])  # ИСПРАВЛЕНО: Убрано ошибочное умножение на 100
+                    # MEXC отдаёт priceChangePercent КАК ДОЛЮ (например 0.0787 = 7.87%),
+                    # а не готовым процентом, как Binance. Проверено живым запросом к
+                    # api.mexc.com: SOLUSDT openPrice 75.21 -> lastPrice 69.29 (-7.87%
+                    # реально), а API вернул priceChangePercent "-0.0787". Поэтому
+                    # умножение на 100 здесь ОБЯЗАТЕЛЬНО, без него фильтр /d почти
+                    # никогда не будет срабатывать.
+                    ch_24 = float(item['priceChangePercent']) * 100
                 except: continue
 
                 if pair not in price_history or price_history[pair].maxlen != max_pts:
@@ -271,13 +277,13 @@ async def parser_task():
                         ch_7, ch_30 = await get_long_term_changes(pair, max_p)
 
                         if settings["week_min_drop"] != 0 and ch_7 > settings["week_min_drop"]:
-                            should_alert = False   
+                            should_alert = False
                         elif settings["month_min_drop"] != 0 and ch_30 > settings["month_min_drop"]:
-                            should_alert = False   
+                            should_alert = False
                         elif settings["week_drop"] > 0 and ch_7 < -settings["week_drop"]:
-                            should_alert = False   
+                            should_alert = False
                         elif settings["month_drop"] > 0 and ch_30 < -settings["month_drop"]:
-                            should_alert = False   
+                            should_alert = False
 
                         if should_alert:
                             daily_memory[pair] = {
@@ -334,4 +340,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                            
+    
