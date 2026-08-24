@@ -45,7 +45,6 @@ settings = {
     "chat_id": None,         # ID админа (куда пишутся логи и команды)
     "channel_id": None,      # ID или юзернейм канала для дублирования сигналов
     "skip_memes": True,      # Пропускать мемкоины
-    "skip_st": True,         # Пропускать монеты с меткой ST (риск-предупреждение)
     "info_refresh_min": 60,  # Как часто обновлять exchangeInfo (мин)
     "use_coingecko": True,   # Брать мемкоины ещё и из категории meme-token
     "cg_refresh_hours": 24   # Как часто обновлять список CoinGecko
@@ -131,7 +130,7 @@ async def load_state():
 
     blacklist.update(str(x).upper() for x in data.get("blacklist", []))
     allowlist.update(str(x).upper() for x in data.get("allowlist", []))
-    for key in ("skip_memes", "skip_st", "use_coingecko"):
+    for key in ("skip_memes", "use_coingecko"):
         if key in data:
             settings[key] = bool(data[key])
     if data.get("cg_symbols"):
@@ -143,9 +142,8 @@ async def load_state():
     for key in ("chat_id", "channel_id"):
         if data.get(key):
             settings[key] = data[key]
-    log("состояние загружено из «%s»: ЧС=%d, allowlist=%d, skip_memes=%s, skip_st=%s"
-        % (storage_source, len(blacklist), len(allowlist),
-           settings["skip_memes"], settings["skip_st"]))
+    log("состояние загружено из «%s»: ЧС=%d, allowlist=%d, skip_memes=%s"
+        % (storage_source, len(blacklist), len(allowlist), settings["skip_memes"]))
 
     if from_file and storage.is_configured() and not storage_error:
         # Первый запуск с Upstash: переносим то, что накопилось в файле.
@@ -158,7 +156,6 @@ def _state_payload():
         "blacklist": sorted(blacklist),
         "allowlist": sorted(allowlist),
         "skip_memes": settings["skip_memes"],
-        "skip_st": settings["skip_st"],
         "chat_id": settings["chat_id"],
         "channel_id": settings["channel_id"],
         "use_coingecko": settings["use_coingecko"],
@@ -227,7 +224,6 @@ async def start_cmd(message: types.Message):
         "/bl — показать ЧС и исключения\n"
         "/memes on|off — фильтр мемкоинов\n"
         "/allow PEPE — считать монету НЕ мемом\n"
-        "/st on|off — фильтр ST-монет\n"
         "/plates — категории монет по данным MEXC\n"
         "/cg on|off|refresh — второй источник мемов (CoinGecko)\n"
         "/why DOGE — почему монета проходит/не проходит\n"
@@ -400,23 +396,6 @@ async def toggle_memes(message: types.Message, command: CommandObject):
         f"(монет под фильтром: {len(meme_pairs)})", parse_mode="HTML")
 
 
-@dp.message(Command("st"))
-async def toggle_st(message: types.Message, command: CommandObject):
-    arg = (command.args or "").strip().lower()
-    if arg in ("on", "вкл", "1"):
-        settings["skip_st"] = True
-    elif arg in ("off", "выкл", "0"):
-        settings["skip_st"] = False
-    else:
-        return await message.answer(
-            f"⚠️ ST-фильтр: <b>{'ВКЛ' if settings['skip_st'] else 'выкл'}</b>\n"
-            "Переключить: /st on | /st off", parse_mode="HTML")
-    save_state()
-    log("ST-фильтр -> %s" % settings["skip_st"], "CMD")
-    await message.answer(f"✅ ST-фильтр <b>{'ВКЛЮЧЕН' if settings['skip_st'] else 'ВЫКЛЮЧЕН'}</b>",
-                         parse_mode="HTML")
-
-
 @dp.message(Command("allow"))
 async def allow_coin(message: types.Message, command: CommandObject):
     if not command.args:
@@ -522,8 +501,6 @@ async def why_coin(message: types.Message, command: CommandObject):
         verdict = "ПРОПУСКАЕТСЯ — ручной ЧС"
     elif meta and not meta["tradable"]:
         verdict = "ПРОПУСКАЕТСЯ — не торгуется"
-    elif settings["skip_st"] and meta and meta["st"]:
-        verdict = "ПРОПУСКАЕТСЯ — метка ST"
     elif settings["skip_memes"] and is_meme:
         verdict = "ПРОПУСКАЕТСЯ — мемкоин (%s)" % reason
     elif tick and tick["vol"] < settings["min_volume"]:
@@ -548,7 +525,6 @@ async def status_cmd(message: types.Message):
         f"📢 Канал: {settings['channel_id'] or 'Не задан'}\n"
         f"🛑 В памяти дампов: {len(daily_memory)}\n\n"
         f"🎭 Мем-фильтр: {'ВКЛ' if settings['skip_memes'] else 'выкл'}\n"
-        f"⚠️ ST-фильтр: {'ВКЛ' if settings['skip_st'] else 'выкл'}\n"
         f"🚫 Мемов найдено: {len(meme_pairs)}\n"
         f"🦎 CoinGecko: {'ВКЛ' if settings['use_coingecko'] else 'выкл'}, "
         f"тикеров {len(cg_symbols)}, {_ago(cg_last_refresh)}\n"
@@ -780,10 +756,6 @@ async def parser_task():
                     if meta and not meta["tradable"]:
                         stats["неторгуемые"] += 1
                         continue
-                    if settings["skip_st"] and meta and meta["st"]:
-                        stats["st"] += 1
-                        continue
-
                     if settings["skip_memes"]:
                         reason = meme_pairs.get(pair)
                         if reason is None and meta is None:
@@ -801,6 +773,8 @@ async def parser_task():
                         stats["объём_мал"] += 1
                         continue
                     stats["анализ"] += 1
+                    if meta and meta["st"]:
+                        stats["st_в_анализе"] += 1
 
                     if pair not in price_history or price_history[pair].maxlen != max_pts:
                         price_history[pair] = deque(maxlen=max_pts)
@@ -908,11 +882,11 @@ async def parser_task():
                     history.append(price)
                     history_hour.append(price)
 
-                log("usdt=%d мемы=%d st=%d чс=%d неторг=%d объём_мал=%d битые=%d "
-                    "анализ=%d сигналы=%d"
-                    % (stats["usdt"], stats["мемы"], stats["st"], stats["ручной_чс"],
+                log("usdt=%d мемы=%d чс=%d неторг=%d объём_мал=%d битые=%d "
+                    "анализ=%d (из них с меткой ST %d) сигналы=%d"
+                    % (stats["usdt"], stats["мемы"], stats["ручной_чс"],
                        stats["неторгуемые"], stats["объём_мал"], stats["битые"],
-                       stats["анализ"], stats["сигналы"]), "SCAN")
+                       stats["анализ"], stats["st_в_анализе"], stats["сигналы"]), "SCAN")
 
         except Exception as e:
             log("ошибка парсера: %r" % e, "ERR")
