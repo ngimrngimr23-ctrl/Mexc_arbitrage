@@ -3,14 +3,18 @@
 Определение идёт слоями, от самого надёжного к запасным:
 
   0. allowlist        — ручное «никогда не считать мемом» (перебивает всё)
-  1. conceptPlates    — мем-зона самой биржи из /api/v3/exchangeInfo.
-                        Самый точный слой: список ведёт MEXC, обновляется сам.
+  1. conceptPlates    — зона Meme+ самой биржи из /api/v3/exchangeInfo.
+                        Точный, но неполный: это витрина, куда MEXC отбирает
+                        монеты вручную (≈200 из ≈1700 пар).
   2. MEME_BASES       — статический список известных мемкоинов.
-  3. TICKER_PATTERNS  — подстроки в тикере (DOGE, INU, PEPE...).
-  4. NAME_RE          — слова в полном названии проекта (fullName из exchangeInfo).
+  3. CoinGecko        — категория meme-token, тысячи тикеров, обновляется сама.
+                        Именно она закрывает разрыв между витриной Meme+ и
+                        реальным количеством мемов на бирже.
+  4. TICKER_PATTERNS  — подстроки в тикере (DOGE, INU, PEPE...).
+  5. NAME_RE          — слова в полном названии проекта (fullName из exchangeInfo).
 
-Слои 2-4 нужны потому, что биржа проставляет плашку не всем монетам
-и свежий листинг может пару дней висеть без категории.
+Слои 2-5 нужны потому, что в зону Meme+ попадает меньшинство мемов:
+у остальных стоит только тарифная плашка innovation.
 """
 
 import re
@@ -60,6 +64,29 @@ NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ------------------------------------------------- защита от коллизий тикеров
+# В мем-категории CoinGecko тысячи мелких токенов, и их тикеры пересекаются
+# с нормальными проектами. Поэтому слою CoinGecko запрещено помечать монету,
+# которой сама биржа выдала тематическую плашку: DeFi, Layer2, RWA и т.д.
+# Тарифные плашки (innovation, assessment, mainly, newlisting2, standalone,
+# Chinese) тематическими не считаются — они стоят у большинства монет.
+SERIOUS_PLATES = {
+    "ai", "aiagent", "layer2", "web3", "gamefi", "defi", "rwa", "depin",
+    "privity", "pow", "nft", "zk", "btcecos", "metaverse", "wlfi", "ton",
+    "perpdex", "fantoken", "defenseenergy", "cex", "storage", "metals",
+    "metalsfutures", "x402", "infofi", "prediction", "0fees", "desci",
+    "hooks", "preipo", "oil", "xstocks",
+}
+
+
+def has_serious_plate(plates):
+    """Плашки выглядят как 'mc-trade-zone-DeFi' — берём часть после дефиса."""
+    for plate in plates or ():
+        if plate.rsplit("-", 1)[-1].lower() in SERIOUS_PLATES:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------- защита
 # Эти монеты не блокируются никогда, чем бы их ни пометили эвристики.
 WHITELIST = {
@@ -73,7 +100,7 @@ WHITELIST = {
 }
 
 
-def classify(base, full_name=None, plates=None, allowlist=None):
+def classify(base, full_name=None, plates=None, allowlist=None, cg_symbols=None):
     """Определяет, мемкоин ли это.
 
     Возвращает (is_meme, reason) — reason всегда объясняет решение
@@ -94,6 +121,13 @@ def classify(base, full_name=None, plates=None, allowlist=None):
 
     if base in MEME_BASES:
         return True, "static"
+
+    if cg_symbols and base in cg_symbols:
+        if has_serious_plate(plates):
+            # Тикер совпал с мемом из CoinGecko, но MEXC считает монету
+            # тематическим проектом — верим бирже, она знает свой листинг.
+            return False, "cg-конфликт-с-плашкой"
+        return True, "coingecko"
 
     for pattern in TICKER_PATTERNS:
         if pattern in base:

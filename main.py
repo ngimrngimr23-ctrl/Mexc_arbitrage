@@ -10,6 +10,7 @@ from collections import deque, Counter
 from datetime import datetime, timezone
 import os
 
+import coingecko
 import storage
 from memecoins import classify, MEME_PLATE_MARKERS
 
@@ -45,7 +46,9 @@ settings = {
     "channel_id": None,      # ID или юзернейм канала для дублирования сигналов
     "skip_memes": True,      # Пропускать мемкоины
     "skip_st": True,         # Пропускать монеты с меткой ST (риск-предупреждение)
-    "info_refresh_min": 60   # Как часто обновлять exchangeInfo (мин)
+    "info_refresh_min": 60,  # Как часто обновлять exchangeInfo (мин)
+    "use_coingecko": True,   # Брать мемкоины ещё и из категории meme-token
+    "cg_refresh_hours": 24   # Как часто обновлять список CoinGecko
 }
 
 price_history = {}
@@ -62,6 +65,9 @@ info_last_refresh = 0.0
 info_last_error = ""
 storage_source = "файл"    # откуда прочитано состояние — видно в /s
 storage_error = ""
+cg_symbols = set()         # тикеры мемкоинов из CoinGecko
+cg_last_refresh = 0.0
+cg_last_error = ""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -125,9 +131,15 @@ async def load_state():
 
     blacklist.update(str(x).upper() for x in data.get("blacklist", []))
     allowlist.update(str(x).upper() for x in data.get("allowlist", []))
-    for key in ("skip_memes", "skip_st"):
+    for key in ("skip_memes", "skip_st", "use_coingecko"):
         if key in data:
             settings[key] = bool(data[key])
+    if data.get("cg_symbols"):
+        global cg_symbols, cg_last_refresh
+        cg_symbols = set(data["cg_symbols"])
+        cg_last_refresh = float(data.get("cg_last_refresh") or 0)
+        log("CoinGecko: из кэша поднято %d тикеров (обновлялось %s)"
+            % (len(cg_symbols), _ago(cg_last_refresh)))
     for key in ("chat_id", "channel_id"):
         if data.get(key):
             settings[key] = data[key]
@@ -149,6 +161,9 @@ def _state_payload():
         "skip_st": settings["skip_st"],
         "chat_id": settings["chat_id"],
         "channel_id": settings["channel_id"],
+        "use_coingecko": settings["use_coingecko"],
+        "cg_symbols": sorted(cg_symbols),
+        "cg_last_refresh": cg_last_refresh,
     }
 
 
@@ -214,6 +229,7 @@ async def start_cmd(message: types.Message):
         "/allow PEPE — считать монету НЕ мемом\n"
         "/st on|off — фильтр ST-монет\n"
         "/plates — категории монет по данным MEXC\n"
+        "/cg on|off|refresh — второй источник мемов (CoinGecko)\n"
         "/why DOGE — почему монета проходит/не проходит\n"
         "/channel @имя_канала — куда дублировать сигналы (пусто = выкл)\n"
         "/s — статус"
@@ -315,10 +331,17 @@ def fmt_max(val):
     return "Выкл" if val == 0 else "-%s%%" % val
 
 
+def _ago(stamp):
+    if not stamp:
+        return "никогда"
+    mins = int((time.time() - stamp) / 60)
+    return "%d ч назад" % (mins // 60) if mins >= 120 else "%d мин назад" % mins
+
+
 def info_age():
     if not info_last_refresh:
         return "ещё не обновлялось"
-    return "%d мин назад" % int((time.time() - info_last_refresh) / 60)
+    return _ago(info_last_refresh)
 
 
 @dp.message(Command("b"))
@@ -418,6 +441,35 @@ async def unallow_coin(message: types.Message, command: CommandObject):
     await message.answer(f"✅ <b>{base}</b> убрана из исключений", parse_mode="HTML")
 
 
+@dp.message(Command("cg"))
+async def toggle_cg(message: types.Message, command: CommandObject):
+    arg = (command.args or "").strip().lower()
+    if arg in ("on", "вкл", "1"):
+        settings["use_coingecko"] = True
+    elif arg in ("off", "выкл", "0"):
+        settings["use_coingecko"] = False
+    elif arg in ("refresh", "обнови"):
+        await message.answer("⏳ Обновляю список CoinGecko…")
+        await refresh_coingecko(force=True)
+        await refresh_exchange_info(force=True)
+        return await message.answer(
+            f"✅ Тикеров из CoinGecko: <b>{len(cg_symbols)}</b>\n"
+            f"Всего мемов: <b>{len(meme_pairs)}</b>\n"
+            f"Ошибка: {cg_last_error or 'нет'}", parse_mode="HTML")
+    else:
+        return await message.answer(
+            f"🦎 CoinGecko: <b>{'ВКЛ' if settings['use_coingecko'] else 'выкл'}</b>\n"
+            f"Тикеров в списке: <b>{len(cg_symbols)}</b>\n"
+            f"Обновлялось: {_ago(cg_last_refresh)}\n"
+            f"Ошибка: {cg_last_error or 'нет'}\n\n"
+            "/cg on | /cg off | /cg refresh", parse_mode="HTML")
+    save_state()
+    await refresh_exchange_info(force=True)
+    await message.answer(
+        f"✅ CoinGecko <b>{'ВКЛЮЧЕН' if settings['use_coingecko'] else 'ВЫКЛЮЧЕН'}</b>\n"
+        f"Мемов теперь: <b>{len(meme_pairs)}</b>", parse_mode="HTML")
+
+
 @dp.message(Command("plates"))
 async def show_plates(message: types.Message):
     if not plate_counter:
@@ -455,7 +507,8 @@ async def why_coin(message: types.Message, command: CommandObject):
         base,
         meta["full_name"] if meta else None,
         meta["plates"] if meta else None,
-        allowlist)
+        allowlist,
+        cg_symbols)
     lines.append(f"🎭 Мем: <b>{'ДА' if is_meme else 'нет'}</b> (причина: {reason})")
     lines.append(f"🚫 В ручном ЧС: {'да' if base in blacklist else 'нет'}")
     lines.append(f"✅ В исключениях: {'да' if base in allowlist else 'нет'}")
@@ -497,6 +550,8 @@ async def status_cmd(message: types.Message):
         f"🎭 Мем-фильтр: {'ВКЛ' if settings['skip_memes'] else 'выкл'}\n"
         f"⚠️ ST-фильтр: {'ВКЛ' if settings['skip_st'] else 'выкл'}\n"
         f"🚫 Мемов найдено: {len(meme_pairs)}\n"
+        f"🦎 CoinGecko: {'ВКЛ' if settings['use_coingecko'] else 'выкл'}, "
+        f"тикеров {len(cg_symbols)}, {_ago(cg_last_refresh)}\n"
         f"📚 Пар в exchangeInfo: {len(symbol_meta)}\n"
         f"🕒 Обновлено: {info_age()}\n"
         f"❗ Ошибка API: {info_last_error or 'нет'}\n"
@@ -538,6 +593,38 @@ async def get_long_term_changes(symbol, current_price):
     except:
         pass
     return 0.0, 0.0
+
+async def refresh_coingecko(force=False):
+    """Раз в сутки тянет категорию meme-token. Возвращает True, если список
+    изменился и монеты надо переклассифицировать."""
+    global cg_symbols, cg_last_refresh, cg_last_error
+
+    if not settings["use_coingecko"]:
+        return False
+    if not force and (time.time() - cg_last_refresh) < settings["cg_refresh_hours"] * 3600:
+        return False
+
+    symbols, err = await coingecko.fetch_meme_symbols(log)
+    cg_last_error = err
+
+    if not symbols:
+        # Ничего не пришло — оставляем прошлый список, иначе мем-фильтр
+        # молча похудеет на тысячу тикеров.
+        log("CoinGecko: список не обновлён, работаю на прежнем (%d тикеров)"
+            % len(cg_symbols), "WARN")
+        return False
+
+    added = len(symbols - cg_symbols)
+    removed = len(cg_symbols - symbols)
+    changed = bool(added or removed)
+    cg_symbols = symbols
+    cg_last_refresh = time.time()
+    if changed:
+        log("CoinGecko: список обновлён — стало %d тикеров (+%d, -%d)"
+            % (len(cg_symbols), added, removed))
+        save_state()
+    return changed
+
 
 async def refresh_exchange_info(force=False):
     """Тянет метаданные символов у MEXC: категории (conceptPlates), полное имя,
@@ -592,7 +679,7 @@ async def refresh_exchange_info(force=False):
                 "st": bool(s.get("st")),
                 "tradable": bool(s.get("isSpotTradingAllowed", True)),
             }
-            is_meme, reason = classify(base, full_name, plates, allowlist)
+            is_meme, reason = classify(base, full_name, plates, allowlist, cg_symbols)
             if is_meme:
                 memes[pair] = reason
                 reasons[reason.split(":")[0]] += 1
@@ -642,8 +729,10 @@ async def refresh_exchange_info(force=False):
     guessed = sorted("%s(%s)" % (pr[:-4], rs) for pr, rs in memes.items()
                      if not rs.startswith("plate:"))
     if guessed:
-        log("не по плашке биржи, проверь глазами (%d): %s — лишнее убирается "
-            "командой /allow ТИКЕР" % (len(guessed), ", ".join(guessed)), "CHECK")
+        shown = guessed[:60]
+        tail = " …и ещё %d" % (len(guessed) - len(shown)) if len(guessed) > len(shown) else ""
+        log("не по плашке биржи (%d): %s%s — лишнее убирается командой /allow ТИКЕР"
+            % (len(guessed), ", ".join(shown), tail), "CHECK")
 
 
 async def parser_task():
@@ -651,7 +740,10 @@ async def parser_task():
     while True:
         try:
             if settings["chat_id"]:
-                await refresh_exchange_info()
+                if await refresh_coingecko():
+                    await refresh_exchange_info(force=True)
+                else:
+                    await refresh_exchange_info()
                 data = await fetch_prices()
                 if not data:
                     log("пустой ответ /ticker/24hr — пропускаю цикл", "ERR")
@@ -696,7 +788,8 @@ async def parser_task():
                         reason = meme_pairs.get(pair)
                         if reason is None and meta is None:
                             # пары нет в exchangeInfo — классифицируем по тикеру
-                            is_meme, r = classify(base, allowlist=allowlist)
+                            is_meme, r = classify(base, allowlist=allowlist,
+                                                  cg_symbols=cg_symbols)
                             if is_meme:
                                 reason = meme_pairs[pair] = r + "|нет-в-exchangeInfo"
                                 log("мем без метаданных: %s (%s)" % (base, r), "MEME")
@@ -835,6 +928,7 @@ async def main():
     log("хранилище: %s" % storage.describe())
     await load_state()
     apply_env_overrides()
+    await refresh_coingecko()
     if settings["chat_id"]:
         log("chat_id восстановлен (%s) — сканирование начнётся сразу"
             % settings["chat_id"])
