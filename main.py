@@ -10,6 +10,7 @@ from collections import deque, Counter
 from datetime import datetime, timezone
 import os
 
+import storage
 from memecoins import classify, MEME_PLATE_MARKERS
 
 # ================= ЛОГИ =================
@@ -59,6 +60,8 @@ plate_counter = Counter()  # какие conceptPlates вообще встреч�
 last_ticker = {}           # PAIR -> {price, vol}, нужен для диагностики /why
 info_last_refresh = 0.0
 info_last_error = ""
+storage_source = "файл"    # откуда прочитано состояние — видно в /s
+storage_error = ""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -83,16 +86,43 @@ def apply_env_overrides():
         log("channel_id взят из переменной окружения: %s" % raw)
 
 
-def load_state():
+def _read_file():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
-        log("%s не найден — стартую с пустыми списками" % STATE_FILE)
-        return
+        log("%s не найден" % STATE_FILE)
     except Exception as e:
         log("не смог прочитать %s: %r" % (STATE_FILE, e), "ERR")
+    return None
+
+
+async def load_state():
+    """Состояние берём из Upstash, если он настроен, иначе из файла.
+    Файл остаётся запасным вариантом, если Redis недоступен."""
+    global storage_source, storage_error
+
+    data = None
+    from_file = False
+    if storage.is_configured():
+        data, storage_error = await storage.load(log)
+        if data is not None:
+            storage_source = "Upstash"
+        elif storage_error:
+            log("Upstash недоступен — пробую локальный файл", "WARN")
+            storage_source = "файл (Upstash с ошибкой)"
+        else:
+            storage_source = "Upstash"
+    if data is None:
+        data = _read_file()
+        from_file = data is not None
+        if from_file and storage_source == "файл":
+            storage_source = "файл"
+
+    if data is None:
+        log("состояние пустое — стартую с чистыми списками")
         return
+
     blacklist.update(str(x).upper() for x in data.get("blacklist", []))
     allowlist.update(str(x).upper() for x in data.get("allowlist", []))
     for key in ("skip_memes", "skip_st"):
@@ -101,23 +131,47 @@ def load_state():
     for key in ("chat_id", "channel_id"):
         if data.get(key):
             settings[key] = data[key]
-    log("состояние загружено: ЧС=%d, allowlist=%d, skip_memes=%s, skip_st=%s"
-        % (len(blacklist), len(allowlist), settings["skip_memes"], settings["skip_st"]))
+    log("состояние загружено из «%s»: ЧС=%d, allowlist=%d, skip_memes=%s, skip_st=%s"
+        % (storage_source, len(blacklist), len(allowlist),
+           settings["skip_memes"], settings["skip_st"]))
+
+    if from_file and storage.is_configured() and not storage_error:
+        # Первый запуск с Upstash: переносим то, что накопилось в файле.
+        log("переношу состояние из файла в Upstash")
+        storage_error = await storage.save(_state_payload(), log)
+
+
+def _state_payload():
+    return {
+        "blacklist": sorted(blacklist),
+        "allowlist": sorted(allowlist),
+        "skip_memes": settings["skip_memes"],
+        "skip_st": settings["skip_st"],
+        "chat_id": settings["chat_id"],
+        "channel_id": settings["channel_id"],
+    }
+
+
+async def _save_remote(payload):
+    global storage_error
+    storage_error = await storage.save(payload, log)
 
 
 def save_state():
+    """Пишем в файл всегда, в Upstash — фоном, чтобы не тормозить команды."""
+    payload = _state_payload()
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "blacklist": sorted(blacklist),
-                "allowlist": sorted(allowlist),
-                "skip_memes": settings["skip_memes"],
-                "skip_st": settings["skip_st"],
-                "chat_id": settings["chat_id"],
-                "channel_id": settings["channel_id"],
-            }, f, ensure_ascii=False, indent=2)
+            json.dump(payload, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log("не смог сохранить %s: %r" % (STATE_FILE, e), "ERR")
+
+    if storage.is_configured():
+        try:
+            asyncio.get_running_loop().create_task(_save_remote(payload))
+        except RuntimeError:
+            # Вне цикла событий (например, в тестах) — остаётся только файл.
+            pass
 
 
 def norm_base(arg):
@@ -446,7 +500,10 @@ async def status_cmd(message: types.Message):
         f"📚 Пар в exchangeInfo: {len(symbol_meta)}\n"
         f"🕒 Обновлено: {info_age()}\n"
         f"❗ Ошибка API: {info_last_error or 'нет'}\n"
-        f"🛠 Ручной ЧС: {len(blacklist)} | Исключения: {len(allowlist)}"
+        f"🛠 Ручной ЧС: {len(blacklist)} | Исключения: {len(allowlist)}\n"
+        f"💾 Хранилище: {storage.describe()}\n"
+        f"📥 Прочитано из: {storage_source}\n"
+        f"❗ Ошибка хранилища: {storage_error or 'нет'}"
         , parse_mode="HTML")
 
 # ================= API & LOGIC =================
@@ -775,7 +832,8 @@ async def handle_ping(request): return web.Response(text="OK", status=200)
 
 async def main():
     log("=== старт бота ===")
-    load_state()
+    log("хранилище: %s" % storage.describe())
+    await load_state()
     apply_env_overrides()
     if settings["chat_id"]:
         log("chat_id восстановлен (%s) — сканирование начнётся сразу"
