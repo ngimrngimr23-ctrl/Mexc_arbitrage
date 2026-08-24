@@ -7,7 +7,7 @@ import time
 import json
 import traceback
 from collections import deque, Counter
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 
 from memecoins import classify, MEME_PLATE_MARKERS
@@ -16,7 +16,8 @@ from memecoins import classify, MEME_PLATE_MARKERS
 
 def log(msg, tag="INFO"):
     """Единая точка логирования: время UTC + тег, чтобы грепать по логам Render."""
-    print("%s [%s] %s" % (datetime.utcnow().strftime("%H:%M:%S"), tag, msg), flush=True)
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print("%s [%s] %s" % (stamp, tag, msg), flush=True)
 
 # ================= НАСТРОЙКИ =================
 # Токен читается из переменной окружения BOT_TOKEN.
@@ -66,6 +67,22 @@ dp = Dispatcher()
 # На Render диск эфемерный: файл переживает рестарт процесса, но не редеплой.
 # Постоянные правки списков делай в memecoins.py — он в git.
 
+def apply_env_overrides():
+    """CHAT_ID и CHANNEL_ID из окружения важнее файла: диск на Render
+    эфемерный и при редеплое filters_state.json пропадает."""
+    raw = os.environ.get("CHAT_ID", "").strip()
+    if raw:
+        try:
+            settings["chat_id"] = int(raw)
+            log("chat_id взят из переменной окружения: %s" % raw)
+        except ValueError:
+            log("CHAT_ID=%r не число — игнорирую" % raw, "ERR")
+    raw = os.environ.get("CHANNEL_ID", "").strip()
+    if raw:
+        settings["channel_id"] = raw
+        log("channel_id взят из переменной окружения: %s" % raw)
+
+
 def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -81,6 +98,9 @@ def load_state():
     for key in ("skip_memes", "skip_st"):
         if key in data:
             settings[key] = bool(data[key])
+    for key in ("chat_id", "channel_id"):
+        if data.get(key):
+            settings[key] = data[key]
     log("состояние загружено: ЧС=%d, allowlist=%d, skip_memes=%s, skip_st=%s"
         % (len(blacklist), len(allowlist), settings["skip_memes"], settings["skip_st"]))
 
@@ -93,6 +113,8 @@ def save_state():
                 "allowlist": sorted(allowlist),
                 "skip_memes": settings["skip_memes"],
                 "skip_st": settings["skip_st"],
+                "chat_id": settings["chat_id"],
+                "channel_id": settings["channel_id"],
             }, f, ensure_ascii=False, indent=2)
     except Exception as e:
         log("не смог сохранить %s: %r" % (STATE_FILE, e), "ERR")
@@ -108,6 +130,7 @@ def norm_base(arg):
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     settings["chat_id"] = message.chat.id
+    save_state()
     await message.answer(
         "🚀 <b>Бот-сканер MEXC запущен</b>\n\n"
         f"📉 Порог окна: <b>{settings['percent']}%</b>\n"
@@ -146,9 +169,11 @@ async def start_cmd(message: types.Message):
 async def set_channel(message: types.Message, command: CommandObject):
     if command.args:
         settings["channel_id"] = command.args
+        save_state()
         await message.answer(f"✅ Канал для сигналов установлен: <b>{command.args}</b>\n<i>Не забудь сделать бота администратором в этом канале!</i>", parse_mode="HTML")
     else:
         settings["channel_id"] = None
+        save_state()
         await message.answer("✅ Дублирование в канал <b>ОТКЛЮЧЕНО</b>", parse_mode="HTML")
 
 @dp.message(Command("p"))
@@ -555,6 +580,14 @@ async def refresh_exchange_info(force=False):
     sample = ", ".join("%s(%s)" % (p[:-4], r) for p, r in sorted(memes.items())[:40])
     log("примеры мемов: %s" % (sample or "нет"), "MEME")
 
+    # Монеты, которые биржа мемами НЕ помечала: только они могут быть
+    # ложным срабатыванием, поэтому печатаем их полностью.
+    guessed = sorted("%s(%s)" % (pr[:-4], rs) for pr, rs in memes.items()
+                     if not rs.startswith("plate:"))
+    if guessed:
+        log("не по плашке биржи, проверь глазами (%d): %s — лишнее убирается "
+            "командой /allow ТИКЕР" % (len(guessed), ", ".join(guessed)), "CHECK")
+
 
 async def parser_task():
     log("--- Фоновый парсер запущен ---")
@@ -743,6 +776,12 @@ async def handle_ping(request): return web.Response(text="OK", status=200)
 async def main():
     log("=== старт бота ===")
     load_state()
+    apply_env_overrides()
+    if settings["chat_id"]:
+        log("chat_id восстановлен (%s) — сканирование начнётся сразу"
+            % settings["chat_id"])
+    else:
+        log("chat_id не задан — жду команду /start, до неё парсер простаивает", "WARN")
     await refresh_exchange_info(force=True)
 
     app = web.Application()

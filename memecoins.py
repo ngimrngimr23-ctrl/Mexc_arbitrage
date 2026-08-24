@@ -31,10 +31,13 @@ MEME_BASES = {
     "GIGA", "PNUT", "GOAT", "MOODENG", "CHILLGUY", "FARTCOIN", "SPX",
     "TRUMP", "MELANIA", "DEGEN", "TOSHI", "NEIRO", "DOGS", "MUMU", "APU",
     "ANDY", "WOJAK", "PUPS", "LUCE", "SUNDOG", "KOMA", "SIGMA", "BILLY",
-    "SNEK", "AIDOGE", "VOLT", "PIT", "LEASH", "BONE", "SAITAMA", "KEKE",
-    "TOSHIMA", "RETARDIO", "SC", "HARAMBE", "SMOG", "DOGWIFHAT", "CATI",
-    "BANANA", "HIPPO", "PEIPEI", "SHIBA", "PORK", "TREMP", "BODEN", "JEO",
+    "SNEK", "AIDOGE", "PIT", "LEASH", "BONE", "SAITAMA", "KEKE",
+    "RETARDIO", "HARAMBE", "SMOG", "HIPPO", "PEIPEI", "SHIBA", "PORK",
+    "TREMP", "BODEN", "JEO",
 }
+# Намеренно НЕ включены, хотя выглядят «мемно»: SC (Siacoin), BANANA
+# (Banana Gun), CATI (Catizen), VOLT. Биржа их мемами не помечает,
+# а слой 2 работает без её данных и дал бы ложное срабатывание.
 
 # ---------------------------------------------------------------- слой 3
 # Подстроки в тикере. Сюда попадают только достаточно длинные и характерные
